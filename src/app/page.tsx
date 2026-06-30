@@ -1,17 +1,19 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
-import { PanelLeftOpen, Sparkles } from "lucide-react";
+import { PanelLeftOpen, Sparkles, Loader2 } from "lucide-react";
 import {
   useChatStore,
   type ChatMessage,
   type Attachment,
   type YouTubeMeta,
 } from "@/store/chat";
+import { useAuth } from "@/store/auth";
 import { Sidebar } from "@/components/chat/Sidebar";
 import { MessageBubble } from "@/components/chat/MessageBubble";
 import { ChatInput } from "@/components/chat/ChatInput";
 import { EmptyState } from "@/components/chat/EmptyState";
+import { LoginScreen } from "@/components/chat/LoginScreen";
 import {
   YouTubeDialog,
   type YouTubeSubmitPayload,
@@ -41,6 +43,13 @@ export default function Home() {
   const [youtubeOpen, setYoutubeOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+
+  const { user, loading: authLoading, fetchMe } = useAuth();
+
+  // Fetch current user on mount
+  useEffect(() => {
+    fetchMe();
+  }, [fetchMe]);
 
   useEffect(() => {
     setHasHydrated(true);
@@ -243,6 +252,18 @@ export default function Home() {
     abortRef.current = null;
     setStreaming(false);
   };
+
+  // Auth gate: show loading spinner while checking session, show login screen if not authed
+  if (authLoading) {
+    return (
+      <div className="flex h-screen w-full items-center justify-center bg-white dark:bg-zinc-950">
+        <Loader2 className="h-8 w-8 animate-spin text-zinc-400" />
+      </div>
+    );
+  }
+  if (!user) {
+    return <LoginScreen />;
+  }
 
   return (
     <div className="flex h-screen w-full overflow-hidden bg-white dark:bg-zinc-950">

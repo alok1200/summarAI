@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import ZAI from "z-ai-web-dev-sdk";
+import { Innertube } from "youtubei.js";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -14,6 +15,15 @@ const UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
+// In-memory cache: videoId+range -> { segments, fetchedAt }
+// Avoids re-fetching transcript when the user retries a failed summary.
+interface CacheEntry {
+  segments: TranscriptSegment[];
+  fetchedAt: number;
+}
+const transcriptCache = new Map<string, CacheEntry>();
+const CACHE_TTL_MS = 1000 * 60 * 10; // 10 minutes
+
 function extractVideoId(url: string): string | null {
   const patterns: RegExp[] = [
     /(?:youtube\.com\/watch\?v=)([A-Za-z0-9_-]{11})/,
@@ -26,7 +36,6 @@ function extractVideoId(url: string): string | null {
     const m = url.match(p);
     if (m) return m[1];
   }
-  // Maybe the user just pasted the video id
   if (/^[A-Za-z0-9_-]{11}$/.test(url.trim())) return url.trim();
   return null;
 }
@@ -60,172 +69,22 @@ function decodeEntities(s: string): string {
     .replace(/&nbsp;/g, " ");
 }
 
-async function fetchTranscript(
-  videoId: string
-): Promise<TranscriptSegment[]> {
-  // Strategy: try fetching the watch page first (richer metadata). If that
-  // gets rate-limited (429) or blocked, fall back to YouTube's internal
-  // `youtubei/v1/player` JSON API, which tends to be more permissive.
-  let captionTracks: any[] | null = null;
-  let lastError: Error | null = null;
-
-  // ----- Attempt 1: scrape the watch page -----
-  try {
-    const watchUrl = `https://www.youtube.com/watch?v=${videoId}`;
-    const res = await fetch(watchUrl, {
-      headers: {
-        "User-Agent": UA,
-        "Accept-Language": "en-US,en;q=0.9",
-        Accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-      },
-    });
-    if (res.ok) {
-      const html = await res.text();
-      const match = html.match(
-        /ytInitialPlayerResponse\s*=\s*(\{[\s\S]*?\})\s*;\s*(?:var\s|const\s|let\s|<\/script>|$)/
-      );
-      if (match) {
-        try {
-          const playerResponse = JSON.parse(match[1]);
-          const playability = playerResponse?.playabilityStatus;
-          if (
-            playability?.status === "ERROR" ||
-            playability?.status === "LOGIN_REQUIRED"
-          ) {
-            throw new Error(
-              playability?.reason ||
-                "This video cannot be accessed (private, age-restricted, or unavailable)."
-            );
-          }
-          const tracks =
-            playerResponse?.captions?.playerCaptionsTracklistRenderer
-              ?.captionTracks;
-          if (Array.isArray(tracks) && tracks.length > 0) {
-            captionTracks = tracks;
-          }
-        } catch (e) {
-          lastError = e as Error;
-        }
-      }
-    } else if (res.status === 429) {
-      lastError = new Error(
-        "YouTube rate-limited the request. Please try again in a moment."
-      );
-    } else {
-      lastError = new Error(
-        `YouTube returned HTTP ${res.status}. The video may be private, deleted, or region-locked.`
-      );
-    }
-  } catch (e) {
-    lastError = e as Error;
-  }
-
-  // ----- Attempt 2: use the youtubei player API -----
-  if (!captionTracks) {
-    try {
-      const tracks = await fetchCaptionTracksViaPlayerApi(videoId);
-      if (tracks && tracks.length > 0) {
-        captionTracks = tracks;
-      }
-    } catch (e) {
-      lastError = e as Error;
-    }
-  }
-
-  if (!captionTracks || captionTracks.length === 0) {
-    throw new Error(
-      lastError?.message ||
-        "This video has no captions or transcript available, or YouTube blocked the request. Try a different video."
-    );
-  }
-
-  // Prefer English (manual), then English (auto), then first available
-  const enManual = captionTracks.find(
-    (t: any) => t.languageCode === "en" && t.kind !== "asr"
-  );
-  const enAuto = captionTracks.find(
-    (t: any) => t.languageCode === "en" && t.kind === "asr"
-  );
-  const track = enManual || enAuto || captionTracks[0];
-  let trackUrl: string = track.baseUrl;
-
-  // Force JSON3 for reliable parsing
-  if (trackUrl.includes("fmt=")) {
-    trackUrl = trackUrl.replace(/fmt=[^&]+/, "fmt=json3");
-  } else {
-    trackUrl += (trackUrl.includes("?") ? "&" : "?") + "fmt=json3";
-  }
-
-  const captionRes = await fetch(trackUrl, {
-    headers: { "User-Agent": UA, "Accept-Language": "en-US,en;q=0.9" },
-  });
-  if (!captionRes.ok) {
-    throw new Error(`Failed to fetch captions (HTTP ${captionRes.status}).`);
-  }
-  const captionText = await captionRes.text();
-
-  let segments: TranscriptSegment[] = [];
-
-  if (captionText.trim().startsWith("{")) {
-    try {
-      const json = JSON.parse(captionText);
-      if (Array.isArray(json.events)) {
-        segments = json.events
-          .filter(
-            (e: any) =>
-              e.segs && Array.isArray(e.segs) && e.segs.length > 0
-          )
-          .map((e: any) => ({
-            start: (e.tStartMs ?? 0) / 1000,
-            dur: (e.dDurationMs ?? 0) / 1000,
-            text: e.segs
-              .map((s: any) => (typeof s.utf8 === "string" ? s.utf8 : ""))
-              .join("")
-              .replace(/\n/g, " ")
-              .trim(),
-          }))
-          .filter((s: TranscriptSegment) => s.text.length > 0);
-      }
-    } catch {
-      // fall through to XML
-    }
-  }
-
-  // Fallback to XML
-  if (segments.length === 0) {
-    const xmlRegex =
-      /<text\s+start="([\d.]+)"\s+dur="([\d.]+)"[^>]*>([\s\S]*?)<\/text>/g;
-    let m: RegExpExecArray | null;
-    while ((m = xmlRegex.exec(captionText)) !== null) {
-      const start = parseFloat(m[1]);
-      const dur = parseFloat(m[2]);
-      const text = decodeEntities(m[3])
-        .replace(/<[^>]+>/g, "")
-        .replace(/\n/g, " ")
-        .trim();
-      if (text) segments.push({ start, dur, text });
-    }
-  }
-
-  if (segments.length === 0) {
-    throw new Error(
-      "Could not parse the transcript. The caption format may be unsupported."
-    );
-  }
-  return segments;
+interface CaptionTrack {
+  languageCode: string;
+  kind?: string;
+  name?: { simpleText?: string; runs?: { text: string }[] };
+  baseUrl: string;
 }
 
 /**
- * YouTube's internal `youtubei/v1/player` API. Returns caption tracks without
- * needing to scrape HTML. Uses the public ANDROID client identity which is
- * generally less aggressively rate-limited.
+ * Strategy 1 (most reliable): use YouTube's internal `youtubei/v1/player` API
+ * with the ANDROID client identity. This bypasses most "Sign in to confirm
+ * you're not a bot" blocks because YouTube trusts requests from its own
+ * Android app.
  */
-async function fetchCaptionTracksViaPlayerApi(
+async function fetchCaptionTracksViaAndroidPlayer(
   videoId: string
-): Promise<any[] | null> {
-  const endpoint =
-    "https://www.youtube.com/youtubei/v1/player?prettyPrint=false";
+): Promise<CaptionTrack[] | null> {
   const body = {
     context: {
       client: {
@@ -238,33 +97,284 @@ async function fetchCaptionTracksViaPlayerApi(
     },
     videoId,
   };
-  const res = await fetch(endpoint, {
-    method: "POST",
-    headers: {
-      "User-Agent": "com.google.android.youtube/20.10.38 (Linux; U; Android 11) gzip",
-      "Content-Type": "application/json",
-      "Accept-Language": "en-US,en;q=0.9",
-    },
-    body: JSON.stringify(body),
-  });
+
+  const res = await fetch(
+    "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
+    {
+      method: "POST",
+      headers: {
+        "User-Agent":
+          "com.google.android.youtube/20.10.38 (Linux; U; Android 11) gzip",
+        "Content-Type": "application/json",
+        "Accept-Language": "en-US,en;q=0.9",
+      },
+      body: JSON.stringify(body),
+    }
+  );
+
   if (!res.ok) {
-    throw new Error(`YouTube player API returned HTTP ${res.status}`);
+    throw new Error(`YouTube ANDROID player API returned HTTP ${res.status}`);
   }
+
   const json = await res.json();
   const playability = json?.playabilityStatus;
   if (
     playability?.status !== "OK" &&
     playability?.status !== "LIVE_STREAM_OFFLINE"
   ) {
-    throw new Error(
+    const reason =
       playability?.reason ||
-        playability?.messages?.[0] ||
-        "This video cannot be accessed."
+      playability?.messages?.[0] ||
+      playability?.errorScreen?.playerErrorMessageRenderer?.subreason?.simpleText;
+    throw new Error(
+      reason || "This video cannot be accessed via the YouTube API."
     );
   }
+
   const tracks =
     json?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-  return Array.isArray(tracks) ? tracks : null;
+  return Array.isArray(tracks) ? (tracks as CaptionTrack[]) : null;
+}
+
+/**
+ * Strategy 2 (fallback): use youtubei.js (Innertube) which uses the WEB
+ * client with proper session cookies. Better for some region-restricted
+ * videos that the ANDROID client can't access.
+ */
+async function fetchCaptionTracksViaInnertube(
+  videoId: string
+): Promise<CaptionTrack[] | null> {
+  const yt = await Innertube.create({
+    location: "US",
+    lang: "en",
+    retrieve_player: false,
+  });
+
+  // Use the Innertube session's http client to call the player API directly
+  // (this gives us proper session cookies + visitor data that bypass some
+  // bot checks).
+  const response = await yt.session.http.fetch("player", {
+    method: "POST",
+    body: JSON.stringify({
+      context: yt.session.context,
+      videoId,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Innertube player API returned HTTP ${response.status}`);
+  }
+
+  const data: any = await response.json();
+  const playability = data?.playabilityStatus;
+  if (playability?.status !== "OK" && playability?.status !== "LIVE_STREAM_OFFLINE") {
+    throw new Error(
+      playability?.reason || "Video is unplayable via the WEB client."
+    );
+  }
+
+  const tracks = data?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+  return Array.isArray(tracks) ? (tracks as CaptionTrack[]) : null;
+}
+
+/**
+ * Strategy 3 (last resort): scrape the watch page HTML. Works for many public
+ * videos but is the most likely to hit "Sign in to confirm you're not a bot".
+ */
+async function fetchCaptionTracksViaWatchPage(
+  videoId: string
+): Promise<CaptionTrack[] | null> {
+  const watchUrl = `https://www.youtube.com/watch?v=${videoId}`;
+  const res = await fetch(watchUrl, {
+    headers: {
+      "User-Agent": UA,
+      "Accept-Language": "en-US,en;q=0.9",
+      Accept:
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    },
+  });
+
+  if (!res.ok) {
+    throw new Error(`Watch page returned HTTP ${res.status}`);
+  }
+
+  const html = await res.text();
+  const match = html.match(
+    /ytInitialPlayerResponse\s*=\s*(\{[\s\S]*?\})\s*;\s*(?:var\s|const\s|let\s|<\/script>|$)/
+  );
+  if (!match) {
+    throw new Error(
+      "Could not find player data on the watch page (YouTube may have changed its HTML structure)."
+    );
+  }
+
+  const playerResponse = JSON.parse(match[1]);
+  const playability = playerResponse?.playabilityStatus;
+  if (
+    playability?.status === "ERROR" ||
+    playability?.status === "LOGIN_REQUIRED"
+  ) {
+    throw new Error(
+      playability?.reason ||
+        "This video cannot be accessed (private, age-restricted, or unavailable)."
+    );
+  }
+
+  const tracks =
+    playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+  return Array.isArray(tracks) && tracks.length > 0
+    ? (tracks as CaptionTrack[])
+    : null;
+}
+
+function pickBestTrack(tracks: CaptionTrack[]): CaptionTrack {
+  const enManual = tracks.find(
+    (t) => t.languageCode === "en" && t.kind !== "asr"
+  );
+  const enAuto = tracks.find(
+    (t) => t.languageCode === "en" && t.kind === "asr"
+  );
+  return enManual || enAuto || tracks[0];
+}
+
+function normalizeTrackUrl(url: string): string {
+  // Force JSON3 format for reliable parsing.
+  if (url.includes("fmt=")) {
+    return url.replace(/fmt=[^&]+/, "fmt=json3");
+  }
+  return url + (url.includes("?") ? "&" : "?") + "fmt=json3";
+}
+
+function parseJson3Transcript(text: string): TranscriptSegment[] {
+  const json = JSON.parse(text);
+  if (!Array.isArray(json.events)) return [];
+  return json.events
+    .filter(
+      (e: any) => e.segs && Array.isArray(e.segs) && e.segs.length > 0
+    )
+    .map((e: any) => ({
+      start: (e.tStartMs ?? 0) / 1000,
+      dur: (e.dDurationMs ?? 0) / 1000,
+      text: e.segs
+        .map((s: any) => (typeof s.utf8 === "string" ? s.utf8 : ""))
+        .join("")
+        .replace(/\n/g, " ")
+        .trim(),
+    }))
+    .filter((s: TranscriptSegment) => s.text.length > 0);
+}
+
+function parseXmlTranscript(text: string): TranscriptSegment[] {
+  const segments: TranscriptSegment[] = [];
+  const xmlRegex =
+    /<text\s+start="([\d.]+)"\s+dur="([\d.]+)"[^>]*>([\s\S]*?)<\/text>/g;
+  let m: RegExpExecArray | null;
+  while ((m = xmlRegex.exec(text)) !== null) {
+    const start = parseFloat(m[1]);
+    const dur = parseFloat(m[2]);
+    const segText = decodeEntities(m[3])
+      .replace(/<[^>]+>/g, "")
+      .replace(/\n/g, " ")
+      .trim();
+    if (segText) segments.push({ start, dur, text: segText });
+  }
+  return segments;
+}
+
+async function fetchTranscriptWithRetry(
+  videoId: string
+): Promise<TranscriptSegment[]> {
+  // Check cache first
+  const cached = transcriptCache.get(videoId);
+  if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
+    return cached.segments;
+  }
+
+  // Try each strategy in order. The ANDROID player API is the most reliable
+  // against "Sign in to confirm you're not a bot" checks.
+  const strategies: {
+    name: string;
+    fn: (id: string) => Promise<CaptionTrack[] | null>;
+  }[] = [
+    { name: "ANDROID player API", fn: fetchCaptionTracksViaAndroidPlayer },
+    { name: "Innertube (WEB client)", fn: fetchCaptionTracksViaInnertube },
+    { name: "Watch page scrape", fn: fetchCaptionTracksViaWatchPage },
+  ];
+
+  let lastError: Error | null = null;
+  let captionTracks: CaptionTrack[] | null = null;
+
+  for (const strategy of strategies) {
+    try {
+      console.log(`[youtube-summary] Trying ${strategy.name} for ${videoId}`);
+      captionTracks = await strategy.fn(videoId);
+      if (captionTracks && captionTracks.length > 0) {
+        console.log(
+          `[youtube-summary] ✓ ${strategy.name} returned ${captionTracks.length} caption tracks`
+        );
+        break;
+      }
+    } catch (e) {
+      console.log(`[youtube-summary] ✗ ${strategy.name} failed:`, (e as Error).message);
+      lastError = e as Error;
+      // Small delay between strategies to avoid hammering YouTube
+      await new Promise((r) => setTimeout(r, 400));
+    }
+  }
+
+  if (!captionTracks || captionTracks.length === 0) {
+    const msg = lastError?.message || "";
+    // Distinguish "bot blocked" from "no captions" so we can give the user
+    // actionable guidance.
+    if (/sign in|bot|consent|429|rate.?limit/i.test(msg)) {
+      throw new Error(
+        "YouTube is currently asking this server to 'sign in to confirm you're not a bot'. " +
+          "This is a transient block on YouTube's side. Please try again in a few minutes, " +
+          "or try a different video. (Underlying error: " + msg + ")"
+      );
+    }
+    throw new Error(
+      "This video has no captions or transcript available, or YouTube blocked the request. " +
+        "Try a different video with English captions enabled." +
+        (msg ? ` (Details: ${msg})` : "")
+    );
+  }
+
+  const track = pickBestTrack(captionTracks);
+  const trackUrl = normalizeTrackUrl(track.baseUrl);
+
+  const captionRes = await fetch(trackUrl, {
+    headers: { "User-Agent": UA, "Accept-Language": "en-US,en;q=0.9" },
+  });
+  if (!captionRes.ok) {
+    throw new Error(`Failed to fetch captions (HTTP ${captionRes.status}).`);
+  }
+  const captionText = await captionRes.text();
+
+  let segments: TranscriptSegment[] = [];
+  if (captionText.trim().startsWith("{")) {
+    try {
+      segments = parseJson3Transcript(captionText);
+    } catch {
+      // fall through to XML
+    }
+  }
+  if (segments.length === 0) {
+    segments = parseXmlTranscript(captionText);
+  }
+  if (segments.length === 0) {
+    throw new Error(
+      "Could not parse the transcript. The caption format may be unsupported."
+    );
+  }
+
+  // Cache for future requests
+  transcriptCache.set(videoId, {
+    segments,
+    fetchedAt: Date.now(),
+  });
+
+  return segments;
 }
 
 export async function POST(req: NextRequest) {
@@ -296,7 +406,7 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    const allSegments = await fetchTranscript(videoId);
+    const allSegments = await fetchTranscriptWithRetry(videoId);
 
     const filtered = allSegments.filter((s) => {
       if (startTime !== undefined && s.start < startTime) return false;
@@ -361,7 +471,6 @@ export async function POST(req: NextRequest) {
       completion?.choices?.[0]?.message?.content ??
       "Sorry, I couldn't generate a summary for this video.";
 
-    // Stream the response with a metadata header prepended
     const header =
       `**▶️ YouTube Video Summary**\n\n` +
       `**URL:** https://www.youtube.com/watch?v=${videoId}\n` +
@@ -374,7 +483,6 @@ export async function POST(req: NextRequest) {
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
       async start(controller) {
-        // Send the header first
         for (const tok of header.match(/\s+|\S+/g) ?? [header]) {
           controller.enqueue(encoder.encode(tok));
           await new Promise((r) => setTimeout(r, 4));
@@ -397,6 +505,7 @@ export async function POST(req: NextRequest) {
     });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Unknown error";
+    console.error("[youtube-summary] error:", message);
     return jsonResponse(500, {
       error: message || "YouTube summary failed.",
     });

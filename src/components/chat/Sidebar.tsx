@@ -11,12 +11,21 @@ import {
   PanelLeftClose,
   Sun,
   Moon,
+  LogOut,
 } from "lucide-react";
 import { useChatStore } from "@/store/chat";
+import { useAuth } from "@/store/auth";
 import { cn } from "@/lib/utils";
 import { useTheme } from "next-themes";
-import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
 interface SidebarProps {
   onClose?: () => void;
@@ -33,8 +42,17 @@ export function Sidebar({ onClose }: SidebarProps) {
   } = useChatStore();
 
   const { theme, setTheme } = useTheme();
+  const { user, logout } = useAuth();
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draftTitle, setDraftTitle] = useState("");
+
+  const handleLogout = async () => {
+    await logout();
+  };
+
+  const displayName = user?.name ?? "User";
+  const displayEmail = user?.email ?? "";
+  const initials = displayName.charAt(0).toUpperCase() || "U";
 
   const handleNew = () => {
     createConversation();
@@ -68,16 +86,9 @@ export function Sidebar({ onClose }: SidebarProps) {
         >
           <PanelLeftClose className="h-5 w-5 text-zinc-700 dark:text-zinc-300" />
         </button>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="rounded-lg hover:bg-zinc-200 dark:hover:bg-zinc-800"
-          onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
-          aria-label="Toggle theme"
-        >
-          <Sun className="h-4 w-4 rotate-0 scale-100 transition-all dark:-rotate-90 dark:scale-0" />
-          <Moon className="absolute h-4 w-4 rotate-90 scale-0 transition-all dark:rotate-0 dark:scale-100" />
-        </Button>
+        <span className="text-xs font-medium text-zinc-400 dark:text-zinc-500 px-2">
+          Menu
+        </span>
       </div>
 
       {/* New chat button */}
@@ -191,18 +202,62 @@ export function Sidebar({ onClose }: SidebarProps) {
         )}
       </nav>
 
-      {/* Footer */}
-      <div className="border-t border-zinc-200 dark:border-zinc-800 p-3">
-        <div className="flex items-center gap-2 rounded-lg px-2 py-1.5">
-          <div className="flex h-7 w-7 items-center justify-center rounded-full bg-gradient-to-br from-emerald-400 to-emerald-600 text-xs font-bold text-white">
-            U
-          </div>
-          <div className="flex-1 min-w-0">
-            <p className="text-sm font-medium text-zinc-800 dark:text-zinc-200 truncate">
-              User
-            </p>
-          </div>
-        </div>
+      {/* Footer — user menu */}
+      <div className="border-t border-zinc-200 dark:border-zinc-800 p-2">
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-zinc-100 dark:hover:bg-zinc-900 transition-colors">
+              <div className="flex h-7 w-7 items-center justify-center rounded-full bg-gradient-to-br from-emerald-400 to-emerald-600 text-xs font-bold text-white flex-shrink-0">
+                {initials}
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium text-zinc-800 dark:text-zinc-200 truncate">
+                  {displayName}
+                </p>
+                {displayEmail && (
+                  <p className="text-[11px] text-zinc-500 dark:text-zinc-400 truncate">
+                    {displayEmail}
+                  </p>
+                )}
+              </div>
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent
+            align="end"
+            side="top"
+            className="w-56"
+            sideOffset={4}
+          >
+            <DropdownMenuLabel className="truncate">
+              {displayEmail || displayName}
+            </DropdownMenuLabel>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+              className="cursor-pointer"
+            >
+              {theme === "dark" ? (
+                <>
+                  <Sun className="mr-2 h-4 w-4" />
+                  <span>Light mode</span>
+                </>
+              ) : (
+                <>
+                  <Moon className="mr-2 h-4 w-4" />
+                  <span>Dark mode</span>
+                </>
+              )}
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              onClick={handleLogout}
+              className="cursor-pointer text-red-600 dark:text-red-400 focus:text-red-700 dark:focus:text-red-300"
+            >
+              <LogOut className="mr-2 h-4 w-4" />
+              <span>Log out</span>
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
     </aside>
   );

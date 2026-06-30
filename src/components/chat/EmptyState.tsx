@@ -1,6 +1,13 @@
 "use client";
 
-import { Sparkles, Code2, BookOpen, Lightbulb } from "lucide-react";
+import {
+  Sparkles,
+  Code2,
+  BookOpen,
+  Lightbulb,
+  Youtube,
+  Paperclip,
+} from "lucide-react";
 
 interface EmptyStateProps {
   onPickPrompt: (prompt: string) => void;
@@ -41,7 +48,8 @@ export function EmptyState({ onPickPrompt }: EmptyStateProps) {
             How can I help you today?
           </h1>
           <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">
-            Ask anything, or pick a suggestion below to get started.
+            Ask anything, attach files, or summarize a YouTube video — pick a
+            suggestion below to begin.
           </p>
         </div>
 
@@ -65,6 +73,18 @@ export function EmptyState({ onPickPrompt }: EmptyStateProps) {
               </div>
             </button>
           ))}
+        </div>
+
+        {/* Feature hints */}
+        <div className="mt-6 flex flex-col sm:flex-row items-stretch sm:items-center justify-center gap-3 text-xs">
+          <div className="flex items-center gap-2 rounded-full border border-zinc-200 dark:border-zinc-800 px-3 py-1.5 text-zinc-600 dark:text-zinc-400">
+            <Paperclip className="h-3.5 w-3.5 text-emerald-500" />
+            Attach images or text/code files
+          </div>
+          <div className="flex items-center gap-2 rounded-full border border-zinc-200 dark:border-zinc-800 px-3 py-1.5 text-zinc-600 dark:text-zinc-400">
+            <Youtube className="h-3.5 w-3.5 text-red-500" />
+            Summarize YouTube videos with a custom timeline
+          </div>
         </div>
       </div>
     </div>

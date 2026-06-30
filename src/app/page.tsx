@@ -2,12 +2,27 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import { PanelLeftOpen, Sparkles } from "lucide-react";
-import { useChatStore, type ChatMessage } from "@/store/chat";
+import {
+  useChatStore,
+  type ChatMessage,
+  type Attachment,
+  type YouTubeMeta,
+} from "@/store/chat";
 import { Sidebar } from "@/components/chat/Sidebar";
 import { MessageBubble } from "@/components/chat/MessageBubble";
 import { ChatInput } from "@/components/chat/ChatInput";
 import { EmptyState } from "@/components/chat/EmptyState";
+import {
+  YouTubeDialog,
+  type YouTubeSubmitPayload,
+} from "@/components/chat/YouTubeDialog";
 import { cn } from "@/lib/utils";
+
+function genId() {
+  return (
+    Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
+  );
+}
 
 export default function Home() {
   const {
@@ -23,16 +38,14 @@ export default function Home() {
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [hasHydrated, setHasHydrated] = useState(false);
+  const [youtubeOpen, setYoutubeOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
-  // Wait for zustand-persist to rehydrate from localStorage
   useEffect(() => {
     setHasHydrated(true);
   }, []);
 
-  // Create an initial conversation on first load if none exists.
-  // Only depend on hasHydrated — we want this to run exactly once after rehydration.
   useEffect(() => {
     if (!hasHydrated) return;
     const state = useChatStore.getState();
@@ -43,7 +56,6 @@ export default function Home() {
     }
   }, [hasHydrated]);
 
-  // Auto-scroll to bottom when messages change
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -53,31 +65,29 @@ export default function Home() {
   const activeConversation = conversations.find((c) => c.id === activeId);
   const messages = activeConversation?.messages ?? [];
 
-  const sendMessage = useCallback(
-    async (text: string) => {
-      if (!text.trim()) return;
-
-      // Get the current active conversation id, creating one if needed
+  /**
+   * Core streaming helper: appends a user message + empty assistant message,
+   * then POSTs to `endpoint` with `payload`, streaming the response into the
+   * assistant placeholder.
+   */
+  const runStream = useCallback(
+    async (
+      userMessage: ChatMessage,
+      endpoint: string,
+      payload: unknown,
+      assistantPrefix?: string
+    ) => {
       let convoId = activeId;
       if (!convoId) {
         convoId = createConversation();
       }
 
-      const userMsg: ChatMessage = {
-        id:
-          Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-        role: "user",
-        content: text,
-        createdAt: Date.now(),
-      };
-      appendMessage(convoId, userMsg);
+      appendMessage(convoId, userMessage);
 
       const assistantMsg: ChatMessage = {
-        id:
-          Date.now().toString(36) + Math.random().toString(36).slice(2, 6) +
-          "a",
+        id: genId() + "a",
         role: "assistant",
-        content: "",
+        content: assistantPrefix ?? "",
         createdAt: Date.now(),
       };
       appendMessage(convoId, assistantMsg);
@@ -87,43 +97,51 @@ export default function Home() {
       abortRef.current = controller;
 
       try {
-        // Build message history for the API (exclude the empty assistant placeholder)
-        const history = useChatStore
-          .getState()
-          .conversations.find((c) => c.id === convoId)
-          ?.messages.filter((m) => m.content !== "")
-          .map((m) => ({ role: m.role, content: m.content })) ?? [];
-
-        const res = await fetch("/api/chat", {
+        const res = await fetch(endpoint, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ messages: history }),
+          body: JSON.stringify(payload),
           signal: controller.signal,
         });
 
-        if (!res.ok || !res.body) {
-          throw new Error(`Request failed: ${res.status}`);
+        if (!res.ok) {
+          let errMsg = `Request failed: ${res.status}`;
+          try {
+            const errBody = await res.json();
+            if (errBody?.error) errMsg = errBody.error;
+          } catch {
+            // ignore parse error
+          }
+          throw new Error(errMsg);
         }
+        if (!res.body) throw new Error("No response body");
 
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
-        let acc = "";
+        let acc = assistantPrefix ?? "";
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
           acc += decoder.decode(value, { stream: true });
           updateMessage(convoId, assistantMsg.id, acc);
         }
+        if (!acc.trim()) {
+          updateMessage(
+            convoId,
+            assistantMsg.id,
+            "_(No response received.)_"
+          );
+        }
       } catch (err: unknown) {
         if ((err as Error)?.name === "AbortError") {
-          // User stopped generation — keep whatever has accumulated.
+          // keep whatever we have so far
         } else {
           const message =
             err instanceof Error ? err.message : "Something went wrong.";
           updateMessage(
             convoId,
             assistantMsg.id,
-            `⚠️ ${message}`
+            `⚠️ **Error:** ${message}`
           );
         }
       } finally {
@@ -131,13 +149,93 @@ export default function Home() {
         abortRef.current = null;
       }
     },
-    [
-      activeId,
-      appendMessage,
-      createConversation,
-      setStreaming,
-      updateMessage,
-    ]
+    [activeId, appendMessage, createConversation, setStreaming, updateMessage]
+  );
+
+  const sendMessage = useCallback(
+    async (text: string, attachments: Attachment[]) => {
+      if (!text.trim() && attachments.length === 0) return;
+
+      const userMsg: ChatMessage = {
+        id: genId(),
+        role: "user",
+        content: text,
+        createdAt: Date.now(),
+        attachments: attachments.length > 0 ? attachments : undefined,
+      };
+
+      // Build the payload from current conversation history + new user message.
+      const state = useChatStore.getState();
+      const convoId = activeId ?? state.conversations[0]?.id;
+      const existing = state.conversations.find((c) => c.id === convoId);
+      const priorMessages = (existing?.messages ?? [])
+        .filter((m) => m.content.trim() !== "")
+        .map((m) => ({
+          role: m.role,
+          content: m.content,
+          attachments: m.attachments,
+        }));
+
+      const payload = {
+        messages: [
+          ...priorMessages,
+          {
+            role: "user" as const,
+            content: text,
+            attachments: attachments.length > 0 ? attachments : undefined,
+          },
+        ],
+      };
+
+      await runStream(userMsg, "/api/chat", payload);
+    },
+    [activeId, runStream]
+  );
+
+  const handleYouTube = useCallback(
+    async (payload: YouTubeSubmitPayload) => {
+      const startSec = parseTimeToSec(payload.startTime);
+      const endSec = parseTimeToSec(payload.endTime);
+
+      const meta: YouTubeMeta = {
+        url: payload.url,
+        videoId: payload.videoId,
+        startTime: startSec,
+        endTime: endSec,
+        instructions: payload.instructions || undefined,
+      };
+
+      const userMsg: ChatMessage = {
+        id: genId(),
+        role: "user",
+        content:
+          `Summarize this YouTube video` +
+          (startSec !== undefined || endSec !== undefined
+            ? ` from ${payload.startTime || "0:00"} to ${
+                payload.endTime || "end"
+              }`
+            : "") +
+          (payload.instructions ? `. Instructions: ${payload.instructions}` : "."),
+        createdAt: Date.now(),
+        youtubeMeta: meta,
+      };
+
+      const apiPayload = {
+        url: payload.url,
+        startTime: payload.startTime,
+        endTime: payload.endTime,
+        instructions: payload.instructions,
+      };
+
+      // Show a "fetching transcript…" placeholder while we wait for the stream.
+      await runStream(
+        userMsg,
+        "/api/youtube-summary",
+        apiPayload,
+        "⏳ Fetching transcript and preparing summary…"
+      );
+    },
+    [runStream]
   );
 
   const handleStop = () => {
@@ -179,7 +277,6 @@ export default function Home() {
 
       {/* Main area */}
       <div className="flex flex-1 flex-col min-w-0">
-        {/* Top bar */}
         <header className="flex h-14 flex-shrink-0 items-center gap-2 border-b border-zinc-200 dark:border-zinc-800 px-3 md:px-4">
           {!sidebarOpen && (
             <button
@@ -203,10 +300,9 @@ export default function Home() {
           </div>
         </header>
 
-        {/* Message list / empty state */}
         <div ref={scrollRef} className="flex-1 overflow-y-auto chatgpt-scroll">
           {messages.length === 0 ? (
-            <EmptyState onPickPrompt={(p) => sendMessage(p)} />
+            <EmptyState onPickPrompt={(p) => sendMessage(p, [])} />
           ) : (
             <div className="pb-4">
               {messages.map((m, idx) => (
@@ -214,6 +310,8 @@ export default function Home() {
                   key={m.id}
                   role={m.role}
                   content={m.content}
+                  attachments={m.attachments}
+                  youtubeMeta={m.youtubeMeta}
                   isStreaming={
                     isStreaming &&
                     idx === messages.length - 1 &&
@@ -225,13 +323,30 @@ export default function Home() {
           )}
         </div>
 
-        {/* Input */}
         <ChatInput
           onSubmit={sendMessage}
           onStop={handleStop}
+          onOpenYouTube={() => setYoutubeOpen(true)}
           isStreaming={isStreaming}
         />
       </div>
+
+      <YouTubeDialog
+        open={youtubeOpen}
+        onOpenChange={setYoutubeOpen}
+        onSubmit={handleYouTube}
+      />
     </div>
   );
+}
+
+function parseTimeToSec(s: string): number | undefined {
+  const trimmed = s.trim();
+  if (!trimmed) return undefined;
+  const parts = trimmed.split(":").map((p) => parseInt(p, 10));
+  if (parts.some((n) => isNaN(n))) return undefined;
+  if (parts.length === 1) return parts[0];
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  return undefined;
 }

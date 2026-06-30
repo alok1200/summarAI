@@ -3,11 +3,35 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
+export type AttachmentKind = "image" | "text" | "file";
+
+export interface Attachment {
+  id: string;
+  name: string;
+  mimeType: string;
+  size: number;
+  kind: AttachmentKind;
+  /** For images: data URL (base64). For text: undefined. */
+  dataUrl?: string;
+  /** For text files: extracted text content. */
+  textContent?: string;
+}
+
+export interface YouTubeMeta {
+  url: string;
+  videoId: string;
+  startTime?: number; // seconds
+  endTime?: number; // seconds
+  instructions?: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant";
   content: string;
   createdAt: number;
+  attachments?: Attachment[];
+  youtubeMeta?: YouTubeMeta;
 }
 
 export interface Conversation {
@@ -23,7 +47,6 @@ interface ChatState {
   activeId: string | null;
   isStreaming: boolean;
 
-  // selectors / actions
   createConversation: () => string;
   deleteConversation: (id: string) => void;
   renameConversation: (id: string, title: string) => void;
@@ -98,10 +121,23 @@ export const useChatStore = create<ChatState>()(
           conversations: s.conversations.map((c) => {
             if (c.id !== conversationId) return c;
             const messages = [...c.messages, message];
-            const title =
-              c.title === "New chat" && message.role === "user"
-                ? deriveTitle(message.content)
-                : c.title;
+            let title = c.title;
+            if (c.title === "New chat" && message.role === "user") {
+              if (message.youtubeMeta) {
+                title = `▶ ${message.youtubeMeta.url}`;
+              } else if (message.attachments?.length) {
+                const first = message.attachments[0];
+                title =
+                  message.content.trim() ||
+                  `📎 ${first.name}${
+                    message.attachments.length > 1
+                      ? ` +${message.attachments.length - 1}`
+                      : ""
+                  }`;
+              } else {
+                title = deriveTitle(message.content);
+              }
+            }
             return {
               ...c,
               messages,
@@ -132,7 +168,6 @@ export const useChatStore = create<ChatState>()(
     }),
     {
       name: "chatgpt-ui-conversations",
-      // Only persist conversations and activeId, not isStreaming
       partialize: (s) => ({
         conversations: s.conversations,
         activeId: s.activeId,

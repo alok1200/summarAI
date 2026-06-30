@@ -1,0 +1,18 @@
+# Meeting Notes - Project Phoenix
+
+Date: 2024-03-15
+Attendees: Alice, Bob, Carol
+
+## Action Items
+1. Alice to finish API integration by Friday
+2. Bob to schedule design review with the team
+3. Carol to draft Q2 roadmap document
+
+## Key Decisions
+- Adopted new tech stack: Next.js + TypeScript + Tailwind
+- Migrated from REST to GraphQL for the v2 API
+- Decided to use serverless functions for background jobs
+
+## Open Questions
+- Should we keep the legacy auth system or migrate to OAuth 2.0?
+- When do we sunset v1 of the API?

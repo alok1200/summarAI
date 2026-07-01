@@ -137,44 +137,62 @@ async function fetchCaptionTracksViaAndroidPlayer(
 }
 
 /**
- * Strategy 2 (fallback): use youtubei.js (Innertube) which uses the WEB
- * client with proper session cookies. Better for some region-restricted
- * videos that the ANDROID client can't access.
+ * Strategy 2 (fallback): use youtubei.js (Innertube) WEB client with a proper
+ * session and visitor data. The library manages PoTokens and visitor data
+ * automatically. For some videos that block the ANDROID client, this works
+ * because YouTube treats the WEB client session more like a real browser.
  */
-async function fetchCaptionTracksViaInnertube(
+async function fetchTranscriptViaInnertubeWeb(
   videoId: string
-): Promise<CaptionTrack[] | null> {
+): Promise<TranscriptSegment[] | null> {
   const yt = await Innertube.create({
     location: "US",
     lang: "en",
     retrieve_player: false,
   });
 
-  // Use the Innertube session's http client to call the player API directly
-  // (this gives us proper session cookies + visitor data that bypass some
-  // bot checks).
-  const response = await yt.session.http.fetch("player", {
-    method: "POST",
-    body: JSON.stringify({
-      context: yt.session.context,
-      videoId,
-    }),
-  });
+  // Fetch video info via the WEB client. This establishes a proper session
+  // with visitor data + cookies that YouTube accepts for most videos.
+  const info = await yt.getInfo(videoId, "WEB");
 
-  if (!response.ok) {
-    throw new Error(`Innertube player API returned HTTP ${response.status}`);
-  }
-
-  const data: any = await response.json();
-  const playability = data?.playabilityStatus;
-  if (playability?.status !== "OK" && playability?.status !== "LIVE_STREAM_OFFLINE") {
-    throw new Error(
-      playability?.reason || "Video is unplayable via the WEB client."
+  // Try the proper transcript API (uses engagement-panel continuation).
+  try {
+    const transcriptInfo = await info.getTranscript();
+    const segments = transcriptInfo?.transcript?.content?.transcript_body
+      ?.transcript_segments;
+    if (segments && segments.length > 0) {
+      const out: TranscriptSegment[] = [];
+      for (const seg of segments) {
+        const startMs = Number(seg.start_ms ?? 0);
+        const endMs = Number(seg.end_ms ?? startMs);
+        const text = (seg.snippets?.map((s: any) => s.text).join(" ") ?? "").trim();
+        if (text) {
+          out.push({
+            start: startMs / 1000,
+            dur: Math.max(0, (endMs - startMs) / 1000),
+            text,
+          });
+        }
+      }
+      if (out.length > 0) return out;
+    }
+  } catch (e) {
+    console.log(
+      "[youtube-summary] Innertube getTranscript failed:",
+      (e as Error).message
     );
   }
 
-  const tracks = data?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-  return Array.isArray(tracks) ? (tracks as CaptionTrack[]) : null;
+  // Fallback: pull caption track URLs from the player response and fetch them
+  // directly. This still benefits from the WEB session's cookies/visitor data.
+  const playerData: any = (info as any)?.page?.[0];
+  const tracks =
+    playerData?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+  if (Array.isArray(tracks) && tracks.length > 0) {
+    return fetchAndParseCaptionTracks(tracks as CaptionTrack[]);
+  }
+
+  return null;
 }
 
 /**
@@ -199,6 +217,9 @@ async function fetchCaptionTracksViaWatchPage(
   }
 
   const html = await res.text();
+  if (html.includes('class="g-recaptcha"') || html.length < 5000) {
+    throw new Error("Watch page returned CAPTCHA / blocked response");
+  }
   const match = html.match(
     /ytInitialPlayerResponse\s*=\s*(\{[\s\S]*?\})\s*;\s*(?:var\s|const\s|let\s|<\/script>|$)/
   );
@@ -266,9 +287,28 @@ function parseJson3Transcript(text: string): TranscriptSegment[] {
 
 function parseXmlTranscript(text: string): TranscriptSegment[] {
   const segments: TranscriptSegment[] = [];
+  // Try srv3 format first: <p t="ms" d="ms"><s>word</s>...</p>
+  const srv3Regex = /<p\s+t="(\d+)"\s+d="(\d+)"[^>]*>([\s\S]*?)<\/p>/g;
+  let m: RegExpExecArray | null;
+  while ((m = srv3Regex.exec(text)) !== null) {
+    const start = parseInt(m[1], 10) / 1000;
+    const dur = parseInt(m[2], 10) / 1000;
+    const inner = m[3];
+    let segText = "";
+    const sRegex = /<s[^>]*>([^<]*)<\/s>/g;
+    let sMatch: RegExpExecArray | null;
+    while ((sMatch = sRegex.exec(inner)) !== null) {
+      segText += sMatch[1];
+    }
+    if (!segText) segText = inner.replace(/<[^>]+>/g, "");
+    segText = decodeEntities(segText).replace(/\n/g, " ").trim();
+    if (segText) segments.push({ start, dur, text: segText });
+  }
+  if (segments.length > 0) return segments;
+
+  // Fall back to classic format: <text start="s" dur="s">content</text>
   const xmlRegex =
     /<text\s+start="([\d.]+)"\s+dur="([\d.]+)"[^>]*>([\s\S]*?)<\/text>/g;
-  let m: RegExpExecArray | null;
   while ((m = xmlRegex.exec(text)) !== null) {
     const start = parseFloat(m[1]);
     const dur = parseFloat(m[2]);
@@ -281,66 +321,10 @@ function parseXmlTranscript(text: string): TranscriptSegment[] {
   return segments;
 }
 
-async function fetchTranscriptWithRetry(
-  videoId: string
+async function fetchAndParseCaptionTracks(
+  tracks: CaptionTrack[]
 ): Promise<TranscriptSegment[]> {
-  // Check cache first
-  const cached = transcriptCache.get(videoId);
-  if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
-    return cached.segments;
-  }
-
-  // Try each strategy in order. The ANDROID player API is the most reliable
-  // against "Sign in to confirm you're not a bot" checks.
-  const strategies: {
-    name: string;
-    fn: (id: string) => Promise<CaptionTrack[] | null>;
-  }[] = [
-    { name: "ANDROID player API", fn: fetchCaptionTracksViaAndroidPlayer },
-    { name: "Innertube (WEB client)", fn: fetchCaptionTracksViaInnertube },
-    { name: "Watch page scrape", fn: fetchCaptionTracksViaWatchPage },
-  ];
-
-  let lastError: Error | null = null;
-  let captionTracks: CaptionTrack[] | null = null;
-
-  for (const strategy of strategies) {
-    try {
-      console.log(`[youtube-summary] Trying ${strategy.name} for ${videoId}`);
-      captionTracks = await strategy.fn(videoId);
-      if (captionTracks && captionTracks.length > 0) {
-        console.log(
-          `[youtube-summary] ✓ ${strategy.name} returned ${captionTracks.length} caption tracks`
-        );
-        break;
-      }
-    } catch (e) {
-      console.log(`[youtube-summary] ✗ ${strategy.name} failed:`, (e as Error).message);
-      lastError = e as Error;
-      // Small delay between strategies to avoid hammering YouTube
-      await new Promise((r) => setTimeout(r, 400));
-    }
-  }
-
-  if (!captionTracks || captionTracks.length === 0) {
-    const msg = lastError?.message || "";
-    // Distinguish "bot blocked" from "no captions" so we can give the user
-    // actionable guidance.
-    if (/sign in|bot|consent|429|rate.?limit/i.test(msg)) {
-      throw new Error(
-        "YouTube is currently asking this server to 'sign in to confirm you're not a bot'. " +
-          "This is a transient block on YouTube's side. Please try again in a few minutes, " +
-          "or try a different video. (Underlying error: " + msg + ")"
-      );
-    }
-    throw new Error(
-      "This video has no captions or transcript available, or YouTube blocked the request. " +
-        "Try a different video with English captions enabled." +
-        (msg ? ` (Details: ${msg})` : "")
-    );
-  }
-
-  const track = pickBestTrack(captionTracks);
+  const track = pickBestTrack(tracks);
   const trackUrl = normalizeTrackUrl(track.baseUrl);
 
   const captionRes = await fetch(trackUrl, {
@@ -367,6 +351,112 @@ async function fetchTranscriptWithRetry(
       "Could not parse the transcript. The caption format may be unsupported."
     );
   }
+  return segments;
+}
+
+async function fetchTranscriptWithRetry(
+  videoId: string
+): Promise<TranscriptSegment[]> {
+  // Check cache first
+  const cached = transcriptCache.get(videoId);
+  if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
+    return cached.segments;
+  }
+
+  // Try each strategy in order.
+  // 1. ANDROID player API (fastest, often works for non-protected videos)
+  // 2. Innertube WEB client (uses proper session cookies + visitor data — best
+  //    chance for videos where ANDROID gets the bot-check)
+  // 3. Watch page scrape (last resort; most likely to hit 429)
+  const strategies: {
+    name: string;
+    fn: (id: string) => Promise<TranscriptSegment[] | null> | Promise<CaptionTrack[] | null>;
+    kind: "segments" | "tracks";
+  }[] = [
+    {
+      name: "ANDROID player API",
+      fn: fetchCaptionTracksViaAndroidPlayer,
+      kind: "tracks",
+    },
+    {
+      name: "Innertube WEB client",
+      fn: fetchTranscriptViaInnertubeWeb,
+      kind: "segments",
+    },
+    {
+      name: "Watch page scrape",
+      fn: fetchCaptionTracksViaWatchPage,
+      kind: "tracks",
+    },
+  ];
+
+  let lastError: Error | null = null;
+  let segments: TranscriptSegment[] | null = null;
+
+  for (const strategy of strategies) {
+    try {
+      console.log(`[youtube-summary] Trying ${strategy.name} for ${videoId}`);
+      const result = await strategy.fn(videoId);
+      if (!result) {
+        console.log(
+          `[youtube-summary] ✗ ${strategy.name} returned no data`
+        );
+        continue;
+      }
+      if (strategy.kind === "tracks") {
+        const tracks = result as CaptionTrack[];
+        if (tracks.length === 0) {
+          console.log(
+            `[youtube-summary] ✗ ${strategy.name} returned 0 tracks`
+          );
+          continue;
+        }
+        console.log(
+          `[youtube-summary] ✓ ${strategy.name} returned ${tracks.length} tracks`
+        );
+        segments = await fetchAndParseCaptionTracks(tracks);
+      } else {
+        const segs = result as TranscriptSegment[];
+        if (segs.length === 0) {
+          console.log(
+            `[youtube-summary] ✗ ${strategy.name} returned 0 segments`
+          );
+          continue;
+        }
+        console.log(
+          `[youtube-summary] ✓ ${strategy.name} returned ${segs.length} segments`
+        );
+        segments = segs;
+      }
+      if (segments && segments.length > 0) break;
+    } catch (e) {
+      const msg = (e as Error).message;
+      console.log(`[youtube-summary] ✗ ${strategy.name} failed: ${msg}`);
+      lastError = e as Error;
+      // Small delay between strategies to avoid hammering YouTube
+      await new Promise((r) => setTimeout(r, 400));
+    }
+  }
+
+  if (!segments || segments.length === 0) {
+    const msg = lastError?.message || "";
+    // Distinguish "bot blocked" from "no captions" so we can give the user
+    // actionable guidance.
+    if (/sign in|bot|consent|429|rate.?limit|captcha/i.test(msg)) {
+      const err = new Error(
+        "YouTube is asking us to sign in to confirm we're not a bot for this video. " +
+          "This happens on videos with stricter bot protection (e.g. some TED talks, music videos, livestreams). " +
+          "You can still get a summary by clicking 'Paste transcript manually' and pasting the transcript text from YouTube's 'Show transcript' panel."
+      );
+      (err as any).code = "BOT_BLOCKED";
+      throw err;
+    }
+    throw new Error(
+      "This video has no captions or transcript available, or YouTube blocked the request. " +
+        "Try a different video with English captions enabled, or use the 'Paste transcript manually' option." +
+        (msg ? ` (Details: ${msg})` : "")
+    );
+  }
 
   // Cache for future requests
   transcriptCache.set(videoId, {
@@ -377,6 +467,127 @@ async function fetchTranscriptWithRetry(
   return segments;
 }
 
+/**
+ * Parse a user-pasted transcript. Accepts several formats:
+ *   - "MM:SS text" or "HH:MM:SS text" (one per line)
+ *   - "[MM:SS] text"
+ *   - "1:23:45 text"
+ *   - Plain text (no timestamps) — each non-empty line becomes a segment
+ *     with a sequential 5-second offset.
+ */
+function parseUserTranscript(raw: string): TranscriptSegment[] {
+  const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  if (lines.length === 0) return [];
+
+  const segments: TranscriptSegment[] = [];
+  let lastStart = 0;
+  const tsRegex = /^\[?(\d{1,2}:\d{2}(?::\d{2})?)\]?\s*(.*)$/;
+
+  for (const line of lines) {
+    const m = line.match(tsRegex);
+    if (m) {
+      const parts = m[1].split(":").map((p) => parseInt(p, 10));
+      let sec: number;
+      if (parts.length === 2) sec = parts[0] * 60 + parts[1];
+      else if (parts.length === 3) sec = parts[0] * 3600 + parts[1] * 60 + parts[2];
+      else sec = 0;
+      lastStart = sec;
+      if (m[2]) {
+        segments.push({ start: sec, dur: 5, text: m[2].trim() });
+      }
+    } else {
+      // No timestamp: use lastStart + small increment
+      segments.push({ start: lastStart, dur: 5, text: line });
+      lastStart += 5;
+    }
+  }
+
+  return segments;
+}
+
+/**
+ * Build the streaming summary response from a list of transcript segments.
+ */
+async function streamSummary(
+  videoId: string | null,
+  url: string,
+  actualStartTime: number,
+  actualEndTime: number,
+  filteredCount: number,
+  instructions: string,
+  transcriptText: string,
+  isManual: boolean
+) {
+  const durationSec = actualEndTime - actualStartTime;
+
+  const systemPrompt =
+    "You are a helpful AI assistant that summarizes YouTube video transcripts. " +
+    "The user has selected a specific time range from the video. " +
+    "Produce a clear, well-structured summary with: a one-paragraph overview, " +
+    "the key points as a bulleted list (referencing timestamps where useful), " +
+    "and any notable quotes or insights. Use Markdown. " +
+    "Do not invent information that isn't in the transcript.";
+
+  const userMessage =
+    `Please summarize the following YouTube video transcript.\n\n` +
+    `Video URL: ${url}\n` +
+    `Selected time range: ${formatTime(actualStartTime)} – ${formatTime(
+      actualEndTime
+    )}  (about ${Math.round(durationSec)}s, ${filteredCount} segments)\n\n` +
+    (instructions
+      ? `Additional instructions from the user: ${instructions}\n\n`
+      : "") +
+    `Transcript (with timestamps):\n\n${transcriptText}\n\n` +
+    `Please provide your structured summary now.`;
+
+  const zai = await ZAI.create();
+  const completion = await zai.chat.completions.create({
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userMessage },
+    ],
+    thinking: { type: "disabled" },
+  });
+
+  const content: string =
+    completion?.choices?.[0]?.message?.content ??
+    "Sorry, I couldn't generate a summary for this video.";
+
+  const sourceLabel = isManual ? " (manual paste)" : "";
+  const header =
+    `**▶️ YouTube Video Summary${sourceLabel}**\n\n` +
+    `**URL:** ${url}\n` +
+    `**Time range:** ${formatTime(actualStartTime)} – ${formatTime(
+      actualEndTime
+    )}  ·  ${filteredCount} transcript segments\n` +
+    (instructions ? `**Your instructions:** ${instructions}\n` : "") +
+    `\n---\n\n`;
+
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    async start(controller) {
+      for (const tok of header.match(/\s+|\S+/g) ?? [header]) {
+        controller.enqueue(encoder.encode(tok));
+        await new Promise((r) => setTimeout(r, 4));
+      }
+      const tokens = content.match(/\s+|\S+/g) ?? [content];
+      for (const token of tokens) {
+        controller.enqueue(encoder.encode(token));
+        await new Promise((r) => setTimeout(r, 12));
+      }
+      controller.close();
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+    },
+  });
+}
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
@@ -384,6 +595,8 @@ export async function POST(req: NextRequest) {
     const startTimeStr: string = body.startTime ?? "";
     const endTimeStr: string = body.endTime ?? "";
     const instructions: string = (body.instructions ?? "").trim();
+    // Optional: user-pasted transcript. When provided, we skip fetching.
+    const manualTranscript: string = (body.transcript ?? "").trim();
 
     const videoId = extractVideoId(url);
     if (!videoId) {
@@ -406,7 +619,23 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    const allSegments = await fetchTranscriptWithRetry(videoId);
+    let allSegments: TranscriptSegment[];
+    let isManual = false;
+
+    if (manualTranscript) {
+      // User provided their own transcript — skip the YouTube fetch entirely.
+      const parsed = parseUserTranscript(manualTranscript);
+      if (parsed.length === 0) {
+        return jsonResponse(400, {
+          error:
+            "Couldn't find any transcript text in your paste. Please paste at least one line of the transcript.",
+        });
+      }
+      allSegments = parsed;
+      isManual = true;
+    } else {
+      allSegments = await fetchTranscriptWithRetry(videoId);
+    }
 
     const filtered = allSegments.filter((s) => {
       if (startTime !== undefined && s.start < startTime) return false;
@@ -424,7 +653,6 @@ export async function POST(req: NextRequest) {
     const actualStartTime = filtered[0].start;
     const lastSeg = filtered[filtered.length - 1];
     const actualEndTime = lastSeg.start + lastSeg.dur;
-    const durationSec = actualEndTime - actualStartTime;
 
     const transcriptText = filtered
       .map((s) => `[${formatTime(s.start)}] ${s.text}`)
@@ -438,74 +666,24 @@ export async function POST(req: NextRequest) {
           "\n\n[... transcript truncated due to length ...]"
         : transcriptText;
 
-    const systemPrompt =
-      "You are a helpful AI assistant that summarizes YouTube video transcripts. " +
-      "The user has selected a specific time range from the video. " +
-      "Produce a clear, well-structured summary with: a one-paragraph overview, " +
-      "the key points as a bulleted list (referencing timestamps where useful), " +
-      "and any notable quotes or insights. Use Markdown. " +
-      "Do not invent information that isn't in the transcript.";
-
-    const userMessage =
-      `Please summarize the following YouTube video transcript.\n\n` +
-      `Video URL: https://www.youtube.com/watch?v=${videoId}\n` +
-      `Selected time range: ${formatTime(actualStartTime)} – ${formatTime(
-        actualEndTime
-      )}  (about ${Math.round(durationSec)}s, ${filtered.length} segments)\n\n` +
-      (instructions
-        ? `Additional instructions from the user: ${instructions}\n\n`
-        : "") +
-      `Transcript (with timestamps):\n\n${truncated}\n\n` +
-      `Please provide your structured summary now.`;
-
-    const zai = await ZAI.create();
-    const completion = await zai.chat.completions.create({
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userMessage },
-      ],
-      thinking: { type: "disabled" },
-    });
-
-    const content: string =
-      completion?.choices?.[0]?.message?.content ??
-      "Sorry, I couldn't generate a summary for this video.";
-
-    const header =
-      `**▶️ YouTube Video Summary**\n\n` +
-      `**URL:** https://www.youtube.com/watch?v=${videoId}\n` +
-      `**Time range:** ${formatTime(actualStartTime)} – ${formatTime(
-        actualEndTime
-      )}  ·  ${filtered.length} transcript segments\n` +
-      (instructions ? `**Your instructions:** ${instructions}\n` : "") +
-      `\n---\n\n`;
-
-    const encoder = new TextEncoder();
-    const stream = new ReadableStream({
-      async start(controller) {
-        for (const tok of header.match(/\s+|\S+/g) ?? [header]) {
-          controller.enqueue(encoder.encode(tok));
-          await new Promise((r) => setTimeout(r, 4));
-        }
-        const tokens = content.match(/\s+|\S+/g) ?? [content];
-        for (const token of tokens) {
-          controller.enqueue(encoder.encode(token));
-          await new Promise((r) => setTimeout(r, 12));
-        }
-        controller.close();
-      },
-    });
-
-    return new Response(stream, {
-      headers: {
-        "Content-Type": "text/plain; charset=utf-8",
-        "Cache-Control": "no-cache, no-transform",
-        Connection: "keep-alive",
-      },
-    });
+    return await streamSummary(
+      videoId,
+      url || `https://www.youtube.com/watch?v=${videoId}`,
+      actualStartTime,
+      actualEndTime,
+      filtered.length,
+      instructions,
+      truncated,
+      isManual
+    );
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Unknown error";
-    console.error("[youtube-summary] error:", message);
+    const code = (err as any)?.code;
+    console.error("[youtube-summary] error:", message, "code:", code);
+    // Return 403 with BOT_BLOCKED so the UI can offer the manual paste option.
+    if (code === "BOT_BLOCKED") {
+      return jsonResponse(403, { error: message, code: "BOT_BLOCKED" });
+    }
     return jsonResponse(500, {
       error: message || "YouTube summary failed.",
     });

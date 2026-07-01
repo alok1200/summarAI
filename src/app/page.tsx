@@ -41,6 +41,7 @@ export default function Home() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [hasHydrated, setHasHydrated] = useState(false);
   const [youtubeOpen, setYoutubeOpen] = useState(false);
+  const [youtubeBotHint, setYoutubeBotHint] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -78,13 +79,17 @@ export default function Home() {
    * Core streaming helper: appends a user message + empty assistant message,
    * then POSTs to `endpoint` with `payload`, streaming the response into the
    * assistant placeholder.
+   *
+   * If the server responds with `{ code: "BOT_BLOCKED" }`, this helper calls
+   * `onBotBlocked` instead of writing an error into the message bubble.
    */
   const runStream = useCallback(
     async (
       userMessage: ChatMessage,
       endpoint: string,
       payload: unknown,
-      assistantPrefix?: string
+      assistantPrefix?: string,
+      onBotBlocked?: (message: string) => void
     ) => {
       let convoId = activeId;
       if (!convoId) {
@@ -115,13 +120,28 @@ export default function Home() {
 
         if (!res.ok) {
           let errMsg = `Request failed: ${res.status}`;
+          let errCode: string | undefined;
           try {
             const errBody = await res.json();
             if (errBody?.error) errMsg = errBody.error;
+            errCode = errBody?.code;
           } catch {
             // ignore parse error
           }
-          throw new Error(errMsg);
+          if (errCode === "BOT_BLOCKED" && onBotBlocked) {
+            onBotBlocked(errMsg);
+            // Replace the placeholder assistant message with a friendly note.
+            updateMessage(
+              convoId,
+              assistantMsg.id,
+              "⚠️ YouTube blocked the auto-fetch for this video. " +
+                "Use the **Paste transcript manually** option in the dialog " +
+                "to paste the transcript text and get your summary."
+            );
+          } else {
+            throw new Error(errMsg);
+          }
+          return;
         }
         if (!res.body) throw new Error("No response body");
 
@@ -214,6 +234,7 @@ export default function Home() {
         instructions: payload.instructions || undefined,
       };
 
+      const isManual = !!payload.transcript;
       const userMsg: ChatMessage = {
         id: genId(),
         role: "user",
@@ -223,6 +244,9 @@ export default function Home() {
             ? ` from ${payload.startTime || "0:00"} to ${
                 payload.endTime || "end"
               }`
+            : "") +
+          (isManual
+            ? " (using a transcript I pasted manually)"
             : "") +
           (payload.instructions ? `. Instructions: ${payload.instructions}` : "."),
         createdAt: Date.now(),
@@ -234,6 +258,7 @@ export default function Home() {
         startTime: payload.startTime,
         endTime: payload.endTime,
         instructions: payload.instructions,
+        transcript: payload.transcript,
       };
 
       // Show a "fetching transcript…" placeholder while we wait for the stream.
@@ -241,7 +266,15 @@ export default function Home() {
         userMsg,
         "/api/youtube-summary",
         apiPayload,
-        "⏳ Fetching transcript and preparing summary…"
+        isManual
+          ? "⏳ Summarizing your pasted transcript…"
+          : "⏳ Fetching transcript and preparing summary…",
+        (botMessage) => {
+          // Auto-reopen the dialog with the bot-blocked hint so the user can
+          // paste the transcript manually.
+          setYoutubeBotHint(botMessage);
+          setYoutubeOpen(true);
+        }
       );
     },
     [runStream]
@@ -356,6 +389,8 @@ export default function Home() {
         open={youtubeOpen}
         onOpenChange={setYoutubeOpen}
         onSubmit={handleYouTube}
+        botBlockedHint={youtubeBotHint}
+        onClearHint={() => setYoutubeBotHint(null)}
       />
     </div>
   );

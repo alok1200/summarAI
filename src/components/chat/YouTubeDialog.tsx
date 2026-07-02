@@ -239,6 +239,15 @@ export function YouTubeDialog({
                 &quot;Show transcript&quot;. Copy the text from the panel that
                 opens, then paste it here.
               </p>
+              {transcript.trim() &&
+                !/^\[?\d{1,2}:\d{2}(?::\d{2})?\]?/m.test(transcript) &&
+                (startTime.trim() || endTime.trim()) && (
+                  <p className="text-[11px] text-amber-600 dark:text-amber-400">
+                    Your pasted transcript doesn&apos;t have timestamps, so the
+                    start/end times will be ignored — we&apos;ll summarize the
+                    whole paste instead.
+                  </p>
+                )}
             </div>
           )}
 

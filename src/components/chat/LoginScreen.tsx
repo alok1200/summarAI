@@ -20,6 +20,7 @@ export function LoginScreen() {
   // actions themselves change (which is never, after first mount).
   const setUser = useAuth((s) => s.setUser);
   const setLoading = useAuth((s) => s.setLoading);
+  const fetchMe = useAuth((s) => s.fetchMe);
 
   const [mode, setMode] = useState<Mode>("login");
   const [email, setEmail] = useState("");
@@ -84,10 +85,22 @@ export function LoginScreen() {
       // Login/signup succeeded. The server set the session cookie AND
       // returned the user object. Set it in the store directly so the
       // parent <Home/> component re-renders and unmounts this login
-      // screen immediately. No second round-trip to /api/auth/me —
-      // that was causing false "cookie wasn't accepted" errors.
+      // screen immediately. No second round-trip to /api/auth/me is
+      // needed for the UI transition.
       setUser(data.user);
       setLoading(false);
+
+      // Non-blocking safety net: re-fetch /api/auth/me in the background
+      // to confirm the cookie was actually accepted by the browser. If
+      // (for any reason — browser quirks, extensions, cookie blocking)
+      // the cookie wasn't stored, fetchMe() will set user back to null
+      // and the login screen will reappear, so the user can retry
+      // instead of being stuck looking at a chat UI that will fail on
+      // the next request. We deliberately do NOT await this — the UI
+      // transition happens immediately based on the POST response above.
+      setTimeout(() => {
+        fetchMe();
+      }, 200);
 
       // The parent will unmount this screen now. No need to reset
       // submitting — the component is going away.

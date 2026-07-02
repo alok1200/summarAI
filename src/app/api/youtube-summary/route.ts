@@ -473,13 +473,23 @@ async function fetchTranscriptWithRetry(
  *   - "1:23:45 text"
  *   - Plain text (no timestamps) — each non-empty line becomes a segment
  *     with a sequential 5-second offset.
+ *
+ * Returns both the segments AND whether any line had a real timestamp, so the
+ * caller can decide whether time-range filtering is meaningful. If the user
+ * pasted plain text without timestamps, applying a time-range filter would
+ * silently drop everything (since all auto-generated timestamps start near 0),
+ * which is almost never what they want.
  */
-function parseUserTranscript(raw: string): TranscriptSegment[] {
+function parseUserTranscript(raw: string): {
+  segments: TranscriptSegment[];
+  hasTimestamps: boolean;
+} {
   const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-  if (lines.length === 0) return [];
+  if (lines.length === 0) return { segments: [], hasTimestamps: false };
 
   const segments: TranscriptSegment[] = [];
   let lastStart = 0;
+  let hasTimestamps = false;
   const tsRegex = /^\[?(\d{1,2}:\d{2}(?::\d{2})?)\]?\s*(.*)$/;
 
   for (const line of lines) {
@@ -491,6 +501,7 @@ function parseUserTranscript(raw: string): TranscriptSegment[] {
       else if (parts.length === 3) sec = parts[0] * 3600 + parts[1] * 60 + parts[2];
       else sec = 0;
       lastStart = sec;
+      hasTimestamps = true;
       if (m[2]) {
         segments.push({ start: sec, dur: 5, text: m[2].trim() });
       }
@@ -501,7 +512,7 @@ function parseUserTranscript(raw: string): TranscriptSegment[] {
     }
   }
 
-  return segments;
+  return { segments, hasTimestamps };
 }
 
 /**
@@ -515,7 +526,8 @@ async function streamSummary(
   filteredCount: number,
   instructions: string,
   transcriptText: string,
-  isManual: boolean
+  isManual: boolean,
+  rangeNote?: string
 ) {
   const durationSec = actualEndTime - actualStartTime;
 
@@ -559,6 +571,7 @@ async function streamSummary(
     `**Time range:** ${formatTime(actualStartTime)} – ${formatTime(
       actualEndTime
     )}  ·  ${filteredCount} transcript segments\n` +
+    (rangeNote ? `**Note:** ${rangeNote}\n` : "") +
     (instructions ? `**Your instructions:** ${instructions}\n` : "") +
     `\n---\n\n`;
 
@@ -620,10 +633,16 @@ export async function POST(req: NextRequest) {
 
     let allSegments: TranscriptSegment[];
     let isManual = false;
+    // For manual pastes that contained no timestamps, time-range filtering
+    // doesn't make sense (every segment was assigned a synthetic 5s-offset
+    // timestamp starting from 0, so any non-trivial start time would drop
+    // everything). We remember this flag and skip the filter below.
+    let skipTimeFilter = false;
 
     if (manualTranscript) {
       // User provided their own transcript — skip the YouTube fetch entirely.
-      const parsed = parseUserTranscript(manualTranscript);
+      const { segments: parsed, hasTimestamps } =
+        parseUserTranscript(manualTranscript);
       if (parsed.length === 0) {
         return jsonResponse(400, {
           error:
@@ -632,20 +651,51 @@ export async function POST(req: NextRequest) {
       }
       allSegments = parsed;
       isManual = true;
+      if (!hasTimestamps && (startTime !== undefined || endTime !== undefined)) {
+        // The user pasted plain text but asked for a time range. We can't
+        // meaningfully filter plain text by time, so we summarize the whole
+        // paste and tell them about it in the summary header.
+        skipTimeFilter = true;
+      }
     } else {
       allSegments = await fetchTranscriptWithRetry(videoId);
     }
 
-    const filtered = allSegments.filter((s) => {
-      if (startTime !== undefined && s.start < startTime) return false;
-      if (endTime !== undefined && s.start >= endTime) return false;
-      return true;
-    });
+    // Apply time-range filter (skipped for plain-text manual pastes).
+    const filtered = skipTimeFilter
+      ? allSegments
+      : allSegments.filter((s) => {
+          if (startTime !== undefined && s.start < startTime) return false;
+          if (endTime !== undefined && s.start >= endTime) return false;
+          return true;
+        });
 
     if (filtered.length === 0) {
+      // Build a more helpful error message that explains WHY nothing matched,
+      // so the user knows how to fix it (remove the time range, paste more
+      // transcript, etc.).
+      const totalSegs = allSegments.length;
+      const firstStart =
+        totalSegs > 0 ? Math.floor(allSegments[0].start) : 0;
+      const lastStart =
+        totalSegs > 0 ? Math.floor(allSegments[totalSegs - 1].start) : 0;
+      const rangeLabel =
+        startTime !== undefined && endTime !== undefined
+          ? `${formatTime(startTime)} – ${formatTime(endTime)}`
+          : startTime !== undefined
+          ? `after ${formatTime(startTime)}`
+          : endTime !== undefined
+          ? `before ${formatTime(endTime)}`
+          : "(no range)";
       return jsonResponse(400, {
         error:
-          "No transcript segments were found in the requested time range. Check the timestamps and try again.",
+          `No transcript segments were found in the requested time range (${rangeLabel}). ` +
+          `The ${isManual ? "pasted transcript" : "video transcript"} covers ` +
+          `${formatTime(firstStart)} – ${formatTime(lastStart)} ` +
+          `(${totalSegs} segments). ` +
+          (isManual
+            ? "If you pasted plain text without timestamps, remove the start/end times and try again — we'll summarize the whole paste. "
+            : "Adjust the start/end times to overlap with the transcript and try again. "),
       });
     }
 
@@ -673,7 +723,10 @@ export async function POST(req: NextRequest) {
       filtered.length,
       instructions,
       truncated,
-      isManual
+      isManual,
+      skipTimeFilter
+        ? "Time range was ignored because the pasted transcript has no timestamps — summarized the whole paste instead."
+        : undefined
     );
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Unknown error";

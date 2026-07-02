@@ -110,9 +110,10 @@ export async function POST(req: NextRequest) {
       }
 
       const completion = await zai.chat.completions.createVision({
+        model: "glm-4v-flash",
         messages: visionMessages,
         thinking: { type: "disabled" },
-      });
+      } as any);
       content =
         completion?.choices?.[0]?.message?.content ??
         "Sorry, I couldn't analyze the attached image(s).";

@@ -153,19 +153,18 @@ async function fetchTranscriptViaInnertubeWeb(
 
   // Fetch video info via the WEB client. This establishes a proper session
   // with visitor data + cookies that YouTube accepts for most videos.
-  const info = await yt.getInfo(videoId, "WEB");
+  const info = await yt.getInfo(videoId, { client: "WEB" });
 
   // Try the proper transcript API (uses engagement-panel continuation).
   try {
     const transcriptInfo = await info.getTranscript();
-    const segments = transcriptInfo?.transcript?.content?.transcript_body
-      ?.transcript_segments;
+    const segments = transcriptInfo?.transcript?.content?.body?.initial_segments;
     if (segments && segments.length > 0) {
       const out: TranscriptSegment[] = [];
-      for (const seg of segments) {
+      for (const seg of segments as any[]) {
         const startMs = Number(seg.start_ms ?? 0);
         const endMs = Number(seg.end_ms ?? startMs);
-        const text = (seg.snippets?.map((s: any) => s.text).join(" ") ?? "").trim();
+        const text = (seg.snippet?.text ?? "").toString().trim();
         if (text) {
           out.push({
             start: startMs / 1000,

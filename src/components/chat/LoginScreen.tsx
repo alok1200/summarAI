@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, FormEvent } from "react";
+import { useState, FormEvent, useRef } from "react";
 import {
   Sparkles,
   Loader2,
@@ -10,13 +10,17 @@ import {
   Eye,
   EyeOff,
 } from "lucide-react";
-import { useAuth } from "@/store/auth";
+import { useAuth, type AuthUser } from "@/store/auth";
 import { cn } from "@/lib/utils";
 
 type Mode = "login" | "signup";
 
 export function LoginScreen() {
-  const { fetchMe } = useAuth();
+  // Fine-grained selectors so this component only re-renders when the
+  // actions themselves change (which is never, after first mount).
+  const setUser = useAuth((s) => s.setUser);
+  const setLoading = useAuth((s) => s.setLoading);
+
   const [mode, setMode] = useState<Mode>("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -25,39 +29,77 @@ export function LoginScreen() {
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
+  // Each submit attempt gets a unique id. If the user clicks again while a
+  // previous request is in flight, the older response is ignored so it
+  // can't clobber newer state.
+  const reqIdRef = useRef(0);
+
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
+    if (submitting) return;
     setError(null);
     setSubmitting(true);
+
+    const reqId = ++reqIdRef.current;
 
     try {
       const endpoint = mode === "login" ? "/api/auth/login" : "/api/auth/signup";
       const payload =
         mode === "login"
-          ? { email, password }
-          : { email, password, name };
+          ? { email: email.trim(), password }
+          : { email: email.trim(), password, name: name.trim() };
 
-      const res = await fetch(endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const data = await res.json();
-
-      if (!res.ok) {
-        setError(data?.error || "Something went wrong. Please try again.");
-        setSubmitting(false);
+      let res: Response;
+      try {
+        res = await fetch(endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+          credentials: "include",
+        });
+      } catch {
+        if (reqId !== reqIdRef.current) return;
+        setError(
+          "Network error — couldn't reach the server. Check your connection and try again."
+        );
         return;
       }
 
-      await fetchMe();
-    } catch {
-      setError("Network error. Please check your connection and try again.");
-      setSubmitting(false);
+      let data: { user?: AuthUser; error?: string } = {};
+      try {
+        data = await res.json();
+      } catch {
+        data = {};
+      }
+
+      if (reqId !== reqIdRef.current) return;
+
+      if (!res.ok || !data.user) {
+        setError(
+          data?.error || `Request failed (${res.status}). Please try again.`
+        );
+        return;
+      }
+
+      // Login/signup succeeded. The server set the session cookie AND
+      // returned the user object. Set it in the store directly so the
+      // parent <Home/> component re-renders and unmounts this login
+      // screen immediately. No second round-trip to /api/auth/me —
+      // that was causing false "cookie wasn't accepted" errors.
+      setUser(data.user);
+      setLoading(false);
+
+      // The parent will unmount this screen now. No need to reset
+      // submitting — the component is going away.
+    } finally {
+      if (reqId === reqIdRef.current) {
+        setSubmitting(false);
+      }
     }
   };
 
   const switchMode = (m: Mode) => {
+    if (submitting) return;
     setMode(m);
     setError(null);
   };
@@ -123,6 +165,7 @@ export function LoginScreen() {
                   <UserIcon className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
                   <input
                     id="name"
+                    name="name"
                     type="text"
                     autoComplete="name"
                     placeholder="Your name"
@@ -146,6 +189,7 @@ export function LoginScreen() {
                 <Mail className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
                 <input
                   id="email"
+                  name="email"
                   type="email"
                   autoComplete="email"
                   placeholder="you@example.com"
@@ -168,6 +212,7 @@ export function LoginScreen() {
                 <Lock className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
                 <input
                   id="password"
+                  name="password"
                   type={showPwd ? "text" : "password"}
                   autoComplete={
                     mode === "login" ? "current-password" : "new-password"
@@ -206,7 +251,7 @@ export function LoginScreen() {
             <button
               type="submit"
               disabled={submitting}
-              className="flex w-full items-center justify-center gap-2 rounded-lg bg-zinc-900 dark:bg-zinc-100 py-2.5 text-sm font-medium text-white dark:text-zinc-900 hover:opacity-90 transition-opacity disabled:opacity-60"
+              className="flex w-full items-center justify-center gap-2 rounded-lg bg-zinc-900 dark:bg-zinc-100 py-2.5 text-sm font-medium text-white dark:text-zinc-900 hover:opacity-90 transition-opacity disabled:opacity-60 disabled:cursor-not-allowed"
             >
               {submitting && <Loader2 className="h-4 w-4 animate-spin" />}
               {mode === "login" ? "Sign in" : "Create account"}
@@ -218,6 +263,7 @@ export function LoginScreen() {
               <>
                 Don&apos;t have an account?{" "}
                 <button
+                  type="button"
                   onClick={() => switchMode("signup")}
                   className="font-medium text-emerald-600 dark:text-emerald-400 hover:underline"
                 >
@@ -228,6 +274,7 @@ export function LoginScreen() {
               <>
                 Already have an account?{" "}
                 <button
+                  type="button"
                   onClick={() => switchMode("login")}
                   className="font-medium text-emerald-600 dark:text-emerald-400 hover:underline"
                 >

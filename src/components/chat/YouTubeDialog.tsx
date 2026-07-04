@@ -25,9 +25,10 @@ import {
   ClipboardPaste,
   AlertCircle,
   GraduationCap,
+  MessageCircleQuestion,
 } from "lucide-react";
 
-export type YouTubeMode = "summary" | "interview";
+export type YouTubeMode = "summary" | "interview" | "ask";
 
 export interface InterviewOptions {
   difficulty: "beginner" | "intermediate" | "advanced" | "mixed";
@@ -176,6 +177,34 @@ export function YouTubeDialog({
     onOpenChange(false);
   };
 
+  // Title / description / submit label depend on mode
+  const titleText =
+    mode === "interview"
+      ? "Interview Q&A from a YouTube video"
+      : mode === "ask"
+      ? "Ask questions about a YouTube video"
+      : "Summarize a YouTube video";
+
+  const descriptionText =
+    mode === "interview"
+      ? "Paste a YouTube URL and optionally pick a time range. We'll fetch the transcript and generate interview-style questions and answers from it."
+      : mode === "ask"
+      ? "Paste a YouTube URL. We'll load the transcript into this conversation so you can ask any question about the video. If you ask about something not in the video, the assistant will tell you so."
+      : "Paste a YouTube URL and optionally pick a time range. We'll fetch the transcript and summarize the selected part for you.";
+
+  const submitButtonLabel =
+    effectiveFetchMode === "manual"
+      ? mode === "interview"
+        ? "Generate Q&A from pasted transcript"
+        : mode === "ask"
+        ? "Load pasted transcript for Q&A"
+        : "Summarize pasted transcript"
+      : mode === "interview"
+      ? "Generate Interview Q&A"
+      : mode === "ask"
+      ? "Load video for Q&A"
+      : "Summarize";
+
   const handleClose = (open: boolean) => {
     if (!open) {
       onClearHint?.();
@@ -183,32 +212,15 @@ export function YouTubeDialog({
     onOpenChange(open);
   };
 
-  const submitButtonLabel =
-    effectiveFetchMode === "manual"
-      ? mode === "interview"
-        ? "Generate Q&A from pasted transcript"
-        : "Summarize pasted transcript"
-      : mode === "interview"
-      ? "Generate Interview Q&A"
-      : "Summarize";
-
   return (
     <Dialog open={open} onOpenChange={handleClose}>
       <DialogContent className="sm:max-w-lg max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Youtube className="h-5 w-5 text-red-600" />
-            {mode === "interview"
-              ? "Interview Q&A from a YouTube video"
-              : "Summarize a YouTube video"}
+            {titleText}
           </DialogTitle>
-          <DialogDescription>
-            Paste a YouTube URL and optionally pick a time range. We&apos;ll
-            fetch the transcript and{" "}
-            {mode === "interview"
-              ? "generate interview-style questions and answers from it."
-              : "summarize the selected part for you."}
-          </DialogDescription>
+          <DialogDescription>{descriptionText}</DialogDescription>
         </DialogHeader>
 
         {showHint && (
@@ -241,31 +253,43 @@ export function YouTubeDialog({
           </div>
         )}
 
-        {/* Mode selector: Summary vs Interview Q&A */}
+        {/* Mode selector: Summary | Interview Q&A | Ask about video */}
         <div className="flex gap-1 rounded-lg bg-zinc-100 dark:bg-zinc-800 p-1">
           <button
             type="button"
             onClick={() => setMode("summary")}
-            className={`flex-1 rounded-md py-1.5 text-xs font-medium transition-colors ${
+            className={`flex-1 rounded-md py-1.5 text-[11px] font-medium transition-colors ${
               mode === "summary"
                 ? "bg-white dark:bg-zinc-950 text-zinc-900 dark:text-white shadow-sm"
                 : "text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-300"
             }`}
           >
-            <Youtube className="inline h-3.5 w-3.5 mr-1" />
+            <Youtube className="inline h-3 w-3 mr-0.5" />
             Summary
           </button>
           <button
             type="button"
             onClick={() => setMode("interview")}
-            className={`flex-1 rounded-md py-1.5 text-xs font-medium transition-colors ${
+            className={`flex-1 rounded-md py-1.5 text-[11px] font-medium transition-colors ${
               mode === "interview"
                 ? "bg-white dark:bg-zinc-950 text-zinc-900 dark:text-white shadow-sm"
                 : "text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-300"
             }`}
           >
-            <GraduationCap className="inline h-3.5 w-3.5 mr-1" />
+            <GraduationCap className="inline h-3 w-3 mr-0.5" />
             Interview Q&amp;A
+          </button>
+          <button
+            type="button"
+            onClick={() => setMode("ask")}
+            className={`flex-1 rounded-md py-1.5 text-[11px] font-medium transition-colors ${
+              mode === "ask"
+                ? "bg-white dark:bg-zinc-950 text-zinc-900 dark:text-white shadow-sm"
+                : "text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-300"
+            }`}
+          >
+            <MessageCircleQuestion className="inline h-3 w-3 mr-0.5" />
+            Ask about video
           </button>
         </div>
 
@@ -473,6 +497,8 @@ export function YouTubeDialog({
               placeholder={
                 mode === "interview"
                   ? "e.g. Focus on React hooks and skip the intro. Include system design questions."
+                  : mode === "ask"
+                  ? "e.g. Treat the transcript as the only source of truth — if I ask about something not in the video, tell me."
                   : "e.g. Focus on the main arguments and skip the intro"
               }
               value={instructions}

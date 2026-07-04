@@ -25,6 +25,24 @@ export interface YouTubeMeta {
   instructions?: string;
 }
 
+/**
+ * When a conversation has `videoContext` set, the chat endpoint will inject
+ * the video transcript as system context and use a strict prompt that tells
+ * the assistant to ONLY answer questions based on the transcript. If the user
+ * asks about something not in the video, the assistant responds with the
+ * `offTopicMessage` below.
+ */
+export interface VideoContext {
+  url: string;
+  videoId: string;
+  title: string;
+  author: string;
+  /** Pre-formatted transcript text, ready to inject into the system prompt. */
+  transcript: string;
+  /** When the video was loaded — for display purposes. */
+  loadedAt: number;
+}
+
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant";
@@ -40,6 +58,8 @@ export interface Conversation {
   messages: ChatMessage[];
   createdAt: number;
   updatedAt: number;
+  /** When set, the conversation is in "ask about video" mode. */
+  videoContext?: VideoContext;
 }
 
 interface ChatState {
@@ -59,6 +79,8 @@ interface ChatState {
   ) => void;
   setStreaming: (streaming: boolean) => void;
   clearAll: () => void;
+  /** Set or clear the video context for a conversation. */
+  setVideoContext: (conversationId: string, ctx: VideoContext | null) => void;
 }
 
 function genId() {
@@ -165,6 +187,15 @@ export const useChatStore = create<ChatState>()(
       setStreaming: (streaming) => set({ isStreaming: streaming }),
 
       clearAll: () => set({ conversations: [], activeId: null }),
+
+      setVideoContext: (conversationId, ctx) =>
+        set((s) => ({
+          conversations: s.conversations.map((c) =>
+            c.id === conversationId
+              ? { ...c, videoContext: ctx ?? undefined, updatedAt: Date.now() }
+              : c
+          ),
+        })),
     }),
     {
       name: "chatgpt-ui-conversations",

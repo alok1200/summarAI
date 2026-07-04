@@ -1,12 +1,13 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
-import { PanelLeftOpen, Sparkles, Loader2 } from "lucide-react";
+import { PanelLeftOpen, Sparkles, Loader2, Youtube } from "lucide-react";
 import {
   useChatStore,
   type ChatMessage,
   type Attachment,
   type YouTubeMeta,
+  type VideoContext,
 } from "@/store/chat";
 import { useAuth } from "@/store/auth";
 import { Sidebar } from "@/components/chat/Sidebar";
@@ -36,6 +37,7 @@ export default function Home() {
     appendMessage,
     updateMessage,
     setStreaming,
+    setVideoContext,
   } = useChatStore();
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -83,6 +85,7 @@ export default function Home() {
 
   const activeConversation = conversations.find((c) => c.id === activeId);
   const messages = activeConversation?.messages ?? [];
+  const videoContext = activeConversation?.videoContext;
 
   /**
    * Core streaming helper: appends a user message + empty assistant message,
@@ -229,7 +232,12 @@ export default function Home() {
           attachments: m.attachments,
         }));
 
-      const payload = {
+      // If the conversation has a video context ("ask about video" mode),
+      // send it along so /api/chat can inject the transcript as the system
+      // prompt and enforce the "only answer from the transcript" rule.
+      const videoCtx = existing?.videoContext;
+
+      const payload: Record<string, unknown> = {
         messages: [
           ...priorMessages,
           {
@@ -239,6 +247,15 @@ export default function Home() {
           },
         ],
       };
+      if (videoCtx) {
+        payload.videoContext = {
+          url: videoCtx.url,
+          videoId: videoCtx.videoId,
+          title: videoCtx.title,
+          author: videoCtx.author,
+          transcript: videoCtx.transcript,
+        };
+      }
 
       await runStream(userMsg, "/api/chat", payload);
     },
@@ -250,6 +267,7 @@ export default function Home() {
       const startSec = parseTimeToSec(payload.startTime);
       const endSec = parseTimeToSec(payload.endTime);
       const isInterview = payload.mode === "interview";
+      const isAsk = payload.mode === "ask";
       const isManual = !!payload.transcript;
 
       const meta: YouTubeMeta = {
@@ -260,7 +278,162 @@ export default function Home() {
         instructions: payload.instructions || undefined,
       };
 
-      // Build a human-readable summary of what the user asked for.
+      // ---------- "Ask about video" mode ----------
+      // This mode is special: it doesn't stream a generated answer. Instead,
+      // we fetch the transcript once via /api/youtube-load, store it as the
+      // conversation's videoContext, and post a welcome message. Subsequent
+      // chat messages in this conversation automatically include the
+      // transcript as system context (see sendMessage above).
+      if (isAsk) {
+        let convoId = activeId;
+        if (!convoId) {
+          convoId = createConversation();
+        }
+
+        // User-side "loaded video" message
+        const userMsg: ChatMessage = {
+          id: genId(),
+          role: "user",
+          content:
+            `Load this YouTube video so I can ask questions about it: ${payload.url}` +
+            (startSec !== undefined || endSec !== undefined
+              ? ` (from ${payload.startTime || "0:00"} to ${
+                  payload.endTime || "end"
+                })`
+              : "") +
+            (isManual ? " (using a transcript I pasted manually)" : ""),
+          createdAt: Date.now(),
+          youtubeMeta: meta,
+        };
+        appendMessage(convoId, userMsg);
+
+        // Assistant placeholder while we fetch the transcript
+        const assistantMsg: ChatMessage = {
+          id: genId() + "a",
+          role: "assistant",
+          content: isManual
+            ? "⏳ Loading your pasted transcript…"
+            : "⏳ Fetching transcript from YouTube…",
+          createdAt: Date.now(),
+        };
+        appendMessage(convoId, assistantMsg);
+        setStreaming(true);
+
+        try {
+          const res = await fetch("/api/youtube-load", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              url: payload.url,
+              startTime: payload.startTime,
+              endTime: payload.endTime,
+              transcript: payload.transcript,
+            }),
+          });
+
+          if (!res.ok) {
+            let errMsg = `Request failed: ${res.status}`;
+            let errCode: string | undefined;
+            let errMeta:
+              | { title?: string; author?: string; thumbnailUrl?: string }
+              | undefined;
+            try {
+              const errBody = await res.json();
+              if (errBody?.error) errMsg = errBody.error;
+              errCode = errBody?.code;
+              errMeta = errBody?.videoMeta;
+            } catch {
+              // ignore
+            }
+            if (errCode === "BOT_BLOCKED") {
+              // Reopen dialog so the user can paste manually
+              setYoutubeBotHint(errMsg);
+              setYoutubeOpen(true);
+              const metaLine = errMeta?.title
+                ? `**Video:** ${errMeta.title}${
+                    errMeta.author ? ` — ${errMeta.author}` : ""
+                  }\n\n`
+                : "";
+              updateMessage(
+                convoId,
+                assistantMsg.id,
+                `⚠️ **YouTube blocked the auto-fetch for this video.**\n\n` +
+                  metaLine +
+                  `Please switch to **"Paste transcript manually"** in the dialog and try again.`
+              );
+            } else {
+              updateMessage(
+                convoId,
+                assistantMsg.id,
+                `⚠️ **Error:** ${errMsg}`
+              );
+            }
+            return;
+          }
+
+          const data = (await res.json()) as {
+            title: string;
+            author: string;
+            url: string;
+            videoId: string;
+            transcript: string;
+            segmentCount: number;
+            startTime: number;
+            endTime: number;
+            rangeNote?: string;
+            isManual: boolean;
+          };
+
+          // Store the transcript as the conversation's video context so
+          // subsequent chat messages get it injected automatically.
+          const ctx: VideoContext = {
+            url: data.url,
+            videoId: data.videoId,
+            title: data.title,
+            author: data.author,
+            transcript: data.transcript,
+            loadedAt: Date.now(),
+          };
+          setVideoContext(convoId, ctx);
+
+          // Welcome message with clear instructions
+          const mins = Math.round(
+            (data.endTime - data.startTime) / 60
+          );
+          const welcomeContent =
+            `✅ **Video loaded — ask me anything about it!**\n\n` +
+            `**Title:** ${data.title}\n` +
+            `**Channel:** ${data.author}\n` +
+            `**URL:** ${data.url}\n` +
+            `**Transcript:** ${data.segmentCount} segments${
+              mins > 0 ? ` · ~${mins} min` : ""
+            }${data.isManual ? " (manual paste)" : ""}\n` +
+            (data.rangeNote ? `**Note:** ${data.rangeNote}\n` : "") +
+            `\n---\n\n` +
+            `I'll answer your questions **only** based on what's in this video's transcript. ` +
+            `If you ask about something that isn't covered in the video, I'll let you know.\n\n` +
+            `**Try asking:**\n` +
+            `- "What is the main topic of this video?"\n` +
+            `- "Summarize the key points"\n` +
+            `- "What did they say about X?"\n` +
+            `- "Explain the part at [MM:SS]"\n\n` +
+            `Go ahead and type your question below 👇`;
+          updateMessage(convoId, assistantMsg.id, welcomeContent);
+        } catch (err: unknown) {
+          const message =
+            err instanceof Error ? err.message : "Something went wrong.";
+          updateMessage(
+            convoId,
+            assistantMsg.id,
+            `⚠️ **Error:** ${message}`
+          );
+        } finally {
+          setStreaming(false);
+        }
+        return;
+      }
+
+      // ---------- Summary / Interview modes (streaming) ----------
       let userMsgContent: string;
       if (isInterview) {
         const opts = payload.interviewOptions;
@@ -297,7 +470,6 @@ export default function Home() {
         youtubeMeta: meta,
       };
 
-      // Build the API payload — shared fields + mode-specific fields.
       const apiPayload: Record<string, unknown> = {
         url: payload.url,
         startTime: payload.startTime,
@@ -325,13 +497,11 @@ export default function Home() {
         : "⏳ Fetching transcript and preparing summary…";
 
       await runStream(userMsg, endpoint, apiPayload, placeholder, (botMessage) => {
-        // Auto-reopen the dialog with the bot-blocked hint so the user can
-        // paste the transcript manually.
         setYoutubeBotHint(botMessage);
         setYoutubeOpen(true);
       });
     },
-    [runStream]
+    [activeId, appendMessage, createConversation, runStream, setStreaming, setVideoContext, updateMessage]
   );
 
   const handleStop = () => {
@@ -407,6 +577,32 @@ export default function Home() {
             </span>
           </div>
         </header>
+
+        {/* Video-context banner — only shown when this conversation has a
+            loaded video (i.e., the user picked "Ask about video" mode). */}
+        {videoContext && (
+          <div className="flex-shrink-0 border-b border-zinc-200 dark:border-zinc-800 bg-gradient-to-r from-red-50 to-amber-50 dark:from-red-950/30 dark:to-amber-950/30 px-4 py-2">
+            <div className="mx-auto max-w-3xl flex items-center gap-2 text-xs">
+              <Youtube className="h-3.5 w-3.5 text-red-600 dark:text-red-400 shrink-0" />
+              <span className="text-zinc-700 dark:text-zinc-300 truncate">
+                <span className="font-semibold">Ask-about-video mode:</span>{" "}
+                <span className="text-zinc-600 dark:text-zinc-400">
+                  {videoContext.title}
+                </span>
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  if (activeId) setVideoContext(activeId, null);
+                }}
+                className="ml-auto shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-white/60 dark:hover:bg-zinc-800/60 transition-colors"
+                title="Exit ask-about-video mode and return to normal chat"
+              >
+                ✕ Exit video mode
+              </button>
+            </div>
+          </div>
+        )}
 
         <div ref={scrollRef} className="flex-1 overflow-y-auto chatgpt-scroll">
           {messages.length === 0 ? (

@@ -8,6 +8,7 @@ import {
   fetchVideoMeta,
   fetchTranscriptWithRetry,
   parseUserTranscript,
+  TIMESTAMP_RULES,
 } from "@/lib/youtube-transcript";
 import {
   chatComplete,
@@ -51,13 +52,14 @@ async function summarizeChunk(
     `Produce a thorough, well-structured summary of JUST this segment with:\n` +
     `- A 3-4 sentence overview that explicitly names every topic discussed in this segment\n` +
     `- A DETAILED breakdown with a ### sub-heading for EVERY topic, sub-topic, or notable moment. Each sub-section must include:\n` +
-    `  · The [MM:SS] timestamp where it appears in this segment\n` +
+    `  · The timestamp where it appears in this segment — copy it EXACTLY from the transcript (e.g. [3:25] or [1:25:30])\n` +
     `  · A long-form explanation (3-6+ sentences) of what is being discussed\n` +
     `  · Any examples, demos, code, or analogies used\n` +
     `  · Any context, motivation, reasoning, or background provided\n` +
     `  · Any caveats, tips, gotchas, or best-practice advice\n` +
     `  · Any names, tools, libraries, frameworks, or resources mentioned\n` +
-    `- A "Notable quotes & insights" subsection with direct quotes (with timestamps)\n\n` +
+    `- A "Notable quotes & insights" subsection with direct quotes (each followed by its [timestamp])\n\n` +
+    TIMESTAMP_RULES + `\n\n` +
     `Use Markdown. Do not invent information that isn't in the transcript. ` +
     `Be EXHAUSTIVE — it is better to over-include than to miss a small topic. ` +
     `Aim for 800-1500 words for a typical 5-10 minute segment.`;
@@ -111,11 +113,12 @@ async function summarizeSection(
     `### Detailed Breakdown — Every Point in This Section\n` +
     `For EVERY topic, sub-topic, example, or notable moment in this section, create a #### sub-heading and write a ` +
     `LONG-FORM detailed explanation (3-6+ sentences) underneath. Each sub-section must include:\n` +
-    `- The [MM:SS] timestamp(s) where it appears\n` +
+    `- The timestamp(s) where it appears — copy EXACTLY from the per-chunk summaries (e.g. [3:25] or [1:25:30])\n` +
     `- A thorough explanation of what is being discussed\n` +
     `- Any examples, demos, code, analogies, context, motivation, caveats, tips, or resources mentioned\n\n` +
     `Cover EVERY small topic — even brief mentions deserve their own entry. ` +
     `Aim for 1500-3000 words for the section. Be exhaustive.\n\n` +
+    TIMESTAMP_RULES + `\n\n` +
     `Use Markdown. Do not invent information not present in the per-chunk summaries.`;
 
   const chunksDescription = chunkSummariesForGroup
@@ -187,7 +190,7 @@ function buildReduceMessages(
     `For EVERY topic, sub-topic, example, demo, or notable moment in the entire video, create a ### sub-heading ` +
     `and write a LONG-FORM detailed explanation underneath. Group related content from different ${inputWord}s together ` +
     `under the most fitting heading. Each sub-section MUST include:\n` +
-    `- The [MM:SS] timestamp(s) where it appears in the video\n` +
+    `- The timestamp(s) where it appears in the video — copy EXACTLY from the ${inputWord} summaries (e.g. [3:25] or [1:25:30])\n` +
     `- A thorough explanation of WHAT is being discussed (3-6+ sentences minimum)\n` +
     `- Any examples, demos, code snippets, or analogies the speaker uses\n` +
     `- Any context, reasoning, motivation, or background the speaker provides\n` +
@@ -196,14 +199,14 @@ function buildReduceMessages(
     `Cover EVERY small topic — even brief mentions or quick tips deserve their own entry. ` +
     `For a long video, aim for 30-200+ distinct sub-sections. It is far better to over-include than to miss something.\n\n` +
     `## Notable Quotes & Insights\n` +
-    `Direct quotes (with timestamps) and any particularly insightful or counterintuitive points the speaker makes ` +
+    `Direct quotes (each followed by its [timestamp]) and any particularly insightful or counterintuitive points the speaker makes ` +
     `anywhere in the video.\n\n` +
     `## Chapter Index\n` +
-    `A compact list of the main sections of the video with their time ranges, so the reader can jump to a specific part.\n\n` +
+    `A compact list of the main sections of the video with their time ranges (using [start]–[end] format), so the reader can jump to a specific part.\n\n` +
+    TIMESTAMP_RULES + `\n\n` +
     `STRICT RULES:\n` +
     `- Do NOT invent information not present in the ${inputWord} summaries.\n` +
     `- Do NOT be concise at the cost of completeness — exhaustiveness is the priority.\n` +
-    `- Always reference timestamps in [MM:SS] format.\n` +
     `- When the same topic appears in multiple ${inputWord}s, MERGE the details under one heading (don't repeat).\n` +
     `- Use Markdown headings, bold, lists, and code blocks for clarity.`;
 
@@ -365,7 +368,7 @@ export async function POST(req: NextRequest) {
         "## Detailed Breakdown — Every Point Explained\n" +
         "For EVERY topic, sub-topic, example, or notable moment in the video, create a ### sub-heading and write a LONG-FORM " +
         "detailed explanation underneath. Each sub-section MUST include:\n" +
-        "- The [MM:SS] timestamp where it appears in the video\n" +
+        "- The timestamp where it appears in the video — copy it EXACTLY from the transcript (e.g. [3:25] or [1:25:30])\n" +
         "- A thorough explanation of WHAT is being discussed (not just a one-liner — write 3-6 sentences minimum per point)\n" +
         "- Any examples, demos, code snippets, or analogies the speaker uses\n" +
         "- Any context, reasoning, motivation, or background the speaker provides\n" +
@@ -374,13 +377,13 @@ export async function POST(req: NextRequest) {
         "Cover EVERY small topic — even minor asides, brief mentions, or quick tips deserve their own entry. " +
         "It is better to over-include than to miss something. Aim for 15-40 distinct sub-sections for a typical 10-30 minute video.\n\n" +
         "## Notable Quotes & Insights\n" +
-        "Direct quotes (with timestamps) and any particularly insightful or counterintuitive points the speaker makes.\n\n" +
+        "Direct quotes (each followed by its [timestamp]) and any particularly insightful or counterintuitive points the speaker makes.\n\n" +
         "## Chapter Index\n" +
-        "A compact list of the main sections of the video with their time ranges, so the reader can jump to a specific part.\n\n" +
+        "A compact list of the main sections of the video with their time ranges (using [start]–[end] format), so the reader can jump to a specific part.\n\n" +
+        TIMESTAMP_RULES + "\n\n" +
         "STRICT RULES:\n" +
         "- Do NOT invent information that isn't in the transcript.\n" +
         "- Do NOT be concise at the cost of completeness — exhaustiveness is the priority.\n" +
-        "- Always reference timestamps in [MM:SS] format so the user can find the source.\n" +
         "- Use Markdown headings, bold, lists, and code blocks for clarity.";
 
       const userMessage =

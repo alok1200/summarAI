@@ -276,3 +276,46 @@ Stage Summary:
 - Files changed: src/lib/llm.ts, .env, .env.example
 - Files added: scripts/verify-env-keys.mjs
 - Contract now enforced app-wide: empty env value → use the default the app already had; non-empty env value → override the default with your key. Verified with a real round-trip chat call on the default path.
+
+---
+Task ID: timeline-fix
+Agent: main
+Task: Fix two user-reported YouTube issues:
+  (1) "AI not providing timeline properly" — timestamps missing/wrong in summaries, Q&A, interview answers, and chat-about-video.
+  (2) "Take time in min not in sec" — bare number in Start/End time field should be minutes, not seconds.
+
+Work Log:
+- Audited every timestamp-related code path:
+    * src/lib/youtube-transcript.ts: parseTimeString (input parsing) + formatTime (display).
+    * src/lib/youtube-chunks.ts: chunk start/end labels + per-line [MM:SS] prefixes.
+    * src/app/api/youtube-summary/route.ts: 4 LLM prompts (summarizeChunk, summarizeSection, buildReduceMessages, short-video system prompt).
+    * src/app/api/youtube-interview/route.ts: 3 LLM prompts (buildSystemPrompt, extractTopicsFromChunk, buildReduceMessages) — discovered buildSystemPrompt never asked the LLM to cite timestamps at all.
+    * src/app/api/youtube-load/route.ts: 1 LLM prompt (buildTopicIndex) — used ambiguous [MM:SS-MM:SS] format.
+    * src/app/api/chat/route.ts: 2 LLM prompts (buildShortVideoSystemPrompt, buildLongVideoSystemPrompt).
+    * src/components/chat/YouTubeDialog.tsx: Start/End time input placeholder + helper text.
+
+- ROOT CAUSE of issue (1): Every prompt told the LLM to "use [MM:SS] format", but the transcript actually uses M:SS for short videos and H:MM:SS for hour-plus videos (formatTime returns H:MM:SS when h>0). This mismatch caused the LLM to either drop the hour component for long videos, or hallucinate timestamps instead of copying them. Also, the interview Q&A prompts had no timestamp citation rule at all.
+
+- FIX for (1): Added a shared TIMESTAMP_RULES constant in src/lib/youtube-transcript.ts that tells the LLM:
+    * Copy timestamps EXACTLY as they appear in the transcript (same digits, same format).
+    * Match M:SS for short videos, H:MM:SS for hour-plus videos — do NOT convert.
+    * NEVER invent a timestamp; if unsure, find the closest one in the transcript.
+    * Every major claim, definition, example, demo, quote, or notable moment MUST be followed by its [timestamp].
+    * For ranges, cite [start]–[end] with an en-dash.
+    * In Chapter Index, list time ranges with a short title.
+  Threaded TIMESTAMP_RULES into all 7 LLM prompts across 4 routes (youtube-summary, youtube-interview, youtube-load, chat). Also added an explicit "every answer MUST cite at least one [timestamp]" rule to the interview buildSystemPrompt (it was missing entirely).
+
+- ROOT CAUSE of issue (2): parseTimeString interpreted a bare number as SECONDS ("5" = 5s). Users naturally think "skip to 5" = 5 minutes, not 5 seconds.
+
+- FIX for (2): parseTimeString now interprets a bare number as MINUTES ("5" = 5 min = 300s). Also added support for explicit unit suffixes so users can be unambiguous: "5m", "90s", "1h", "1h30m", "2h15m30s", "1h 30m" (with spaces). M:SS and H:MM:SS forms are unchanged.
+
+- Updated YouTubeDialog.tsx helper text under the Start/End time inputs to explain the new rules: "Minutes, not seconds. 5 = 5 min. Also accepts 5:30, 1:25:30, 90s, 1h30m."
+
+- Verification:
+    * `npx tsc --noEmit` passes.
+    * scripts/verify-time-parsing.mjs — 20/20 checks pass (bare numbers, M:SS, H:MM:SS, unit suffixes, composite forms, whitespace, garbage).
+
+Stage Summary:
+- Files changed: src/lib/youtube-transcript.ts, src/components/chat/YouTubeDialog.tsx, src/app/api/youtube-summary/route.ts, src/app/api/youtube-interview/route.ts, src/app/api/youtube-load/route.ts, src/app/api/chat/route.ts
+- Files added: scripts/verify-time-parsing.mjs
+- The AI now has explicit, consistent timestamp-citation rules across every YouTube-related prompt, and the time-input field now treats bare numbers as minutes (matching user mental model) while still accepting M:SS / H:MM:SS / explicit unit suffixes.

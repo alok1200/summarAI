@@ -608,7 +608,10 @@ export function YouTubeDialog({
                 value={startTime}
                 onChange={(e) => setStartTime(e.target.value)}
               />
-              <p className="text-[11px] text-zinc-500">Format: MM:SS or HH:MM:SS</p>
+              <p className="text-[11px] text-zinc-500">
+                Minutes, not seconds. <code>5</code> = 5&nbsp;min. Also accepts
+                <code> 5:30</code>, <code>1:25:30</code>, <code>90s</code>, <code>1h30m</code>.
+              </p>
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="yt-end">End time (optional)</Label>
@@ -618,7 +621,9 @@ export function YouTubeDialog({
                 value={endTime}
                 onChange={(e) => setEndTime(e.target.value)}
               />
-              <p className="text-[11px] text-zinc-500">Leave empty for full video</p>
+              <p className="text-[11px] text-zinc-500">
+                A bare number is minutes. Leave empty for full video.
+              </p>
             </div>
           </div>
 

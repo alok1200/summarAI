@@ -8,6 +8,7 @@ import {
   fetchVideoMeta,
   fetchTranscriptWithRetry,
   parseUserTranscript,
+  TIMESTAMP_RULES,
 } from "@/lib/youtube-transcript";
 import {
   chatComplete,
@@ -91,7 +92,9 @@ function buildSystemPrompt(
     `## Question 1: <short question title>\n` +
     `**Q:** <the full question>\n\n` +
     `**A:** <a 1-paragraph answer with reasoning and at least one concrete example ` +
-    `or piece of evidence drawn from the video. Aim for 3-5 sentences.>\n\n` +
+    `or piece of evidence drawn from the video. Aim for 3-5 sentences.> ` +
+    `End the answer with the [timestamp] in the transcript where this topic is discussed, ` +
+    `copied EXACTLY as it appears (e.g. [3:25] or [1:25:30]).\n\n` +
     `> 💡 **Tip:** <one-line follow-up tip, common follow-up question, or pitfall to watch for>\n\n` +
     `---\n\n` +
     `## Question 2: ...\n\n` +
@@ -103,13 +106,15 @@ function buildSystemPrompt(
     `- <bullet 3: common mistake to avoid>\n` +
     `- <bullet 4: practical takeaway>\n` +
     `- <bullet 5: high-yield revision point>\n\n` +
+    TIMESTAMP_RULES + `\n\n` +
     `RULES:\n` +
     `1. Every question MUST be answerable from the transcript content. Do NOT invent facts.\n` +
     `2. Number the questions 1..${questionCount} exactly. Do not skip numbers.\n` +
     `3. Use clear, simple English. Avoid filler phrases.\n` +
     `4. If the transcript is too short or off-topic, still produce your best ${questionCount} ` +
     `questions and note any limitations at the top.\n` +
-    `5. Vary the question style (definition, application, comparison, scenario, debugging).\n`
+    `5. Vary the question style (definition, application, comparison, scenario, debugging).\n` +
+    `6. Every answer MUST cite at least one [timestamp] from the transcript where the topic is discussed. `
   );
 }
 
@@ -136,8 +141,10 @@ async function extractTopicsFromChunk(
     `These topics will be merged with topics from other segments and used to generate ` +
     `the final interview questions, so be specific and cite timestamps.\n\n` +
     `For each topic, output a Markdown bullet in this exact format:\n` +
-    `- [MM:SS] **Topic name** — one-sentence description of what's covered and what kind of ` +
+    `- [timestamp] **Topic name** — one-sentence description of what's covered and what kind of ` +
     `${ctx.interviewType} question could be asked about it at ${ctx.difficulty} difficulty.\n\n` +
+    `The timestamp MUST be copied EXACTLY from the transcript prefix — same digits, same format ` +
+    `([M:SS] for short videos, [H:MM:SS] for hour-plus videos). Do NOT invent or reformat timestamps.\n\n` +
     `Aim for 5-12 topics per segment. Pick the most question-worthy concepts, definitions, ` +
     `comparisons, decisions, and concrete examples mentioned in this segment. ` +
     `Do NOT generate the actual questions — just identify topics. Do NOT invent topics ` +
@@ -152,8 +159,8 @@ async function extractTopicsFromChunk(
     `Target difficulty: ${ctx.difficulty}\n` +
     `Interview type: ${ctx.interviewType}\n` +
     (ctx.targetRole ? `Target role: ${ctx.targetRole}\n` : "") +
-    `\nTranscript segment:\n\n${chunk.text}\n\n` +
-    `List the topics now (Markdown bullets, each starting with a [MM:SS] timestamp).`;
+    `\nTranscript segment (timestamps are prefixed in [brackets] — copy them EXACTLY):\n\n${chunk.text}\n\n` +
+    `List the topics now (Markdown bullets, each starting with a [timestamp] copied from the transcript).`;
 
   return await chatComplete([
     { role: "system", content: systemPrompt },
@@ -209,8 +216,8 @@ function buildReduceMessages(
     `Below are question-worthy TOPICS extracted from each segment of the video (with timestamps). ` +
     `Use these topics as your source of truth for what the video covers. Pick a DIVERSE, balanced ` +
     `set of ${ctx.questionCount} questions spanning different segments of the video — do not cluster ` +
-    `all questions around one segment. Each answer should reference the relevant [MM:SS] timestamp ` +
-    `from the topic list.\n\n` +
+    `all questions around one segment. Each answer MUST cite the relevant [timestamp] copied EXACTLY ` +
+    `from the topic list (e.g. [3:25] or [1:25:30] — match the format you see).\n\n` +
     `--- TOPIC LIST (per segment) ---\n\n${mergedTopics}\n\n` +
     `--- END TOPIC LIST ---\n\n` +
     `Now generate the ${ctx.questionCount} questions and answers following the format from the system prompt.`;

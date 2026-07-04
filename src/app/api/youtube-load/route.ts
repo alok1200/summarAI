@@ -52,7 +52,11 @@ async function buildTopicIndex(
         `Your job: extract a concise list of TOPICS covered in this segment. ` +
         `These will be used to decide which segment to load when the user asks a question.\n\n` +
         `Output format — one bullet per topic, EXACTLY this format:\n` +
-        `- [MM:SS-MM:SS] Topic name — short description\n\n` +
+        `- [start]–[end] Topic name — short description\n\n` +
+        `The [start] and [end] timestamps MUST be copied EXACTLY from the transcript prefix — ` +
+        `same digits, same format ([M:SS] for short videos, [H:MM:SS] for hour-plus videos). ` +
+        `Do NOT invent or reformat timestamps. Use the timestamp of the first segment line as ` +
+        `[start] and the timestamp of the last segment line covering this topic as [end].\n\n` +
         `Aim for 5-10 topics. Use specific noun phrases (e.g. "useEffect cleanup function", ` +
         `"useState batching behavior") not vague categories. Do NOT include topics not in the transcript.`;
 

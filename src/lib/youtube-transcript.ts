@@ -67,9 +67,29 @@ export function extractVideoId(url: string): string | null {
 export function parseTimeString(s: string): number | undefined {
   const trimmed = s.trim();
   if (!trimmed) return undefined;
+  // Support optional "m" / "s" / "h" unit suffixes for explicit input, e.g.:
+  //   "5m"     → 5 minutes        "90s"   → 90 seconds
+  //   "1h"     → 1 hour           "1h30m" → 1h30m
+  //   "2h15m30s" → 2h15m30s       "1h 30m" → 1h30m (spaces ok)
+  // These always win over the bare-number rule below.
+  if (/[hms]/i.test(trimmed) && /^[\d\s.:hms]+$/i.test(trimmed)) {
+    const h = trimmed.match(/(\d+)\s*h/i);
+    const m = trimmed.match(/(\d+)\s*m/i);
+    const sec = trimmed.match(/(\d+)\s*s/i);
+    if (h || m || sec) {
+      let total = 0;
+      if (h) total += parseInt(h[1], 10) * 3600;
+      if (m) total += parseInt(m[1], 10) * 60;
+      if (sec) total += parseInt(sec[1], 10);
+      return total;
+    }
+  }
   const parts = trimmed.split(":").map((p) => parseInt(p, 10));
   if (parts.some((n) => isNaN(n))) return undefined;
-  if (parts.length === 1) return parts[0];
+  // BARE NUMBER → MINUTES (so "5" means 5 min, not 5 sec).
+  // This matches how a human naturally thinks about video timestamps:
+  // "skip to 5" = the 5-minute mark, not 5 seconds in.
+  if (parts.length === 1) return parts[0] * 60;
   if (parts.length === 2) return parts[0] * 60 + parts[1];
   if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
   return undefined;
@@ -82,6 +102,35 @@ export function formatTime(s: number): string {
   const pad = (n: number) => n.toString().padStart(2, "0");
   return h > 0 ? `${h}:${pad(m)}:${pad(sec)}` : `${m}:${pad(sec)}`;
 }
+
+/**
+ * Shared instructions injected into every YouTube LLM prompt so the AI always
+ * cites timestamps the SAME way — by COPYING them verbatim from the transcript,
+ * not by inventing or reformatting them.
+ *
+ * This is the fix for "AI not providing timeline properly":
+ *   - The transcript already shows timestamps in M:SS (short videos) or
+ *     H:MM:SS (long videos) format. The LLM was previously told to always
+ *     use [MM:SS], which conflicted with the transcript for hour-plus videos
+ *     and caused it to drop or hallucinate timestamps.
+ *   - Now we tell it: copy the timestamp EXACTLY as it appears in the
+ *     transcript, in square brackets, and never invent one.
+ */
+export const TIMESTAMP_RULES =
+  `TIMESTAMP CITATION RULES (very important):\n` +
+  `- The transcript is prefixed with timestamps like [3:25] or [1:25:30]. ` +
+  `ALWAYS copy the timestamp EXACTLY as it appears in the transcript — same digits, same format.\n` +
+  `- For videos under 1 hour, timestamps look like [M:SS] (e.g. [3:25], [12:08]). ` +
+  `For videos 1 hour or longer, they look like [H:MM:SS] (e.g. [1:25:30], [2:05:14]). ` +
+  `Match whatever format you see in the transcript — do NOT convert between them.\n` +
+  `- NEVER invent a timestamp that doesn't appear in the transcript. If you're unsure ` +
+  `which timestamp to cite, find the closest one in the transcript and use that.\n` +
+  `- Every major claim, definition, example, demo, quote, or notable moment MUST be ` +
+  `followed by its [timestamp] in square brackets so the user can jump to that moment.\n` +
+  `- When covering a topic that spans a range of time, cite the range like ` +
+  `[3:25]–[7:48] (using an en-dash). For a single moment, cite a single [timestamp].\n` +
+  `- In the Chapter Index (or any "jump to" list), list time ranges as ` +
+  `[start]–[end] with a short title, e.g. "[3:25]–[7:48] React hooks intro".`;
 
 function decodeEntities(s: string): string {
   return s

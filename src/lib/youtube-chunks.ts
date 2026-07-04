@@ -206,3 +206,59 @@ export function estimateChunkCount(
   }
   return Math.max(1, Math.ceil(totalChars / target));
 }
+
+/**
+ * Group chunks into batches for HIERARCHICAL REDUCE.
+ *
+ * Why this exists: a 50-hour video produces ~100+ chunks, and each chunk
+ * summary is now ~5-10K chars (we made them detailed). 100 chunks × 8K chars
+ * = ~800K chars of per-chunk summaries — far too much to feed into a single
+ * "reduce" LLM call (would blow the context window and lose detail).
+ *
+ * Solution: when chunks.length > REDUCE_THRESHOLD, group the chunks into
+ * batches of GROUP_SIZE, reduce each batch into a "section summary", then
+ * reduce all section summaries into the final unified summary.
+ *
+ *   Level 0 (MAP):       chunk_1, chunk_2, ..., chunk_100  →  100 chunk summaries
+ *   Level 1 (SECTION):   group every 7 chunks              →  ~15 section summaries
+ *   Level 2 (FINAL):     combine 15 section summaries      →  1 final comprehensive summary
+ *
+ * Each section summary is itself comprehensive for its time range, so the
+ * final reduce call only needs to synthesize ~15 inputs (well within context).
+ *
+ * @returns Either:
+ *   - { hierarchical: false } — chunks are few enough for a single reduce
+ *   - { hierarchical: true, groups: [[chunk, ...], ...] } — reduce each group first
+ */
+export interface ReducePlan {
+  hierarchical: boolean;
+  /** Only set when hierarchical=true. Each group is a contiguous batch of chunks. */
+  groups?: TranscriptChunk[][];
+}
+
+/** Above this chunk count, use hierarchical reduce. */
+export const REDUCE_THRESHOLD = 8;
+/** Target chunks per section in hierarchical reduce. */
+export const SECTION_GROUP_SIZE = 7;
+
+export function planReduce(chunks: TranscriptChunk[]): ReducePlan {
+  if (chunks.length <= REDUCE_THRESHOLD) {
+    return { hierarchical: false };
+  }
+  const groups: TranscriptChunk[][] = [];
+  for (let i = 0; i < chunks.length; i += SECTION_GROUP_SIZE) {
+    groups.push(chunks.slice(i, i + SECTION_GROUP_SIZE));
+  }
+  return { hierarchical: true, groups };
+}
+
+/**
+ * Build a label for a group of contiguous chunks, e.g. "00:15:00 – 01:42:30
+ * (chunks 8–14 of 100)".
+ */
+export function groupLabel(group: TranscriptChunk[]): string {
+  const first = group[0];
+  const last = group[group.length - 1];
+  return `${first.startTimeLabel} – ${last.endTimeLabel} ` +
+    `(chunks ${first.index}–${last.index} of ${first.total})`;
+}

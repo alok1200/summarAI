@@ -133,14 +133,19 @@ export async function getZai() {
  * tokens immediately and the proxy doesn't time out.
  */
 export async function chatComplete(
-  messages: ChatMessage[]
+  messages: ChatMessage[],
+  options?: { maxTokens?: number }
 ): Promise<string> {
   const zai = await getZai();
+  const params: Record<string, unknown> = {
+    messages,
+    thinking: { type: "disabled" },
+  };
+  if (options?.maxTokens) {
+    params.max_tokens = options.maxTokens;
+  }
   const completion = await withRetry(() =>
-    zai.chat.completions.create({
-      messages,
-      thinking: { type: "disabled" },
-    })
+    zai.chat.completions.create(params as any)
   );
   return (
     completion?.choices?.[0]?.message?.content ??
@@ -233,15 +238,20 @@ class SSEParser {
  * mid-stream failures are not retried (would duplicate partial output).
  */
 export async function chatCompleteStream(
-  messages: ChatMessage[]
+  messages: ChatMessage[],
+  options?: { maxTokens?: number }
 ): Promise<ReadableStream<Uint8Array>> {
   const zai = await getZai();
+  const params: Record<string, unknown> = {
+    messages,
+    stream: true,
+    thinking: { type: "disabled" },
+  };
+  if (options?.maxTokens) {
+    params.max_tokens = options.maxTokens;
+  }
   const stream = await withRetry(() =>
-    zai.chat.completions.create({
-      messages,
-      stream: true,
-      thinking: { type: "disabled" },
-    })
+    zai.chat.completions.create(params as any)
   );
 
   const encoder = new TextEncoder();

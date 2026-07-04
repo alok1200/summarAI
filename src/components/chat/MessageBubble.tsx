@@ -359,7 +359,7 @@ function AssistantActionBar({
     <div className="mt-2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
       <button
         onClick={handleCopy}
-        className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
+        className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-700 transition-colors"
         title="Copy response"
       >
         {copied ? (
@@ -376,7 +376,7 @@ function AssistantActionBar({
       {isLatest && !isStreaming && onRegenerate && (
         <button
           onClick={onRegenerate}
-          className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
+          className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-700 transition-colors"
           title="Regenerate response"
         >
           <RefreshCw className="h-3 w-3" /> Regenerate
@@ -388,7 +388,7 @@ function AssistantActionBar({
           href={`https://www.youtube.com/watch?v=${videoId}`}
           target="_blank"
           rel="noopener noreferrer"
-          className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-zinc-500 hover:text-red-600 dark:hover:text-red-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
+          className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-zinc-500 hover:text-red-600 dark:hover:text-red-400 hover:bg-zinc-100 dark:hover:bg-zinc-700 transition-colors"
           title="Open video on YouTube"
         >
           <Youtube className="h-3 w-3" /> Open video
@@ -430,14 +430,22 @@ function MessageBubbleImpl({
   return (
     <div
       className={cn(
-        "group relative w-full px-4 py-6 md:px-8",
-        isUser ? "bg-transparent" : "bg-zinc-50 dark:bg-zinc-900/40"
+        "group relative w-full px-4 py-3 md:px-8",
+        isUser
+          ? "bg-transparent"
+          : "bg-zinc-50/60 dark:bg-zinc-900/30"
       )}
     >
-      <div className="mx-auto flex max-w-3xl gap-4">
+      <div
+        className={cn(
+          "mx-auto flex max-w-3xl gap-3 items-start",
+          isUser ? "justify-start" : "justify-end flex-row-reverse"
+        )}
+      >
+        {/* Avatar */}
         <div
           className={cn(
-            "flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-xs font-bold text-white",
+            "flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-xs font-bold text-white shadow-sm",
             isUser
               ? "bg-gradient-to-br from-emerald-400 to-emerald-600"
               : "bg-gradient-to-br from-zinc-700 to-zinc-900 dark:from-zinc-200 dark:to-zinc-400 dark:text-zinc-900"
@@ -446,8 +454,27 @@ function MessageBubbleImpl({
           {isUser ? <User className="h-4 w-4" /> : "AI"}
         </div>
 
-        <div className="flex-1 min-w-0 overflow-hidden">
-          <div className="mb-1 text-sm font-semibold text-zinc-800 dark:text-zinc-200">
+        {/* Bubble */}
+        <div
+          className={cn(
+            "flex min-w-0 flex-col",
+            // Cap width so bubbles don't span the full row on desktop.
+            // On mobile, allow up to ~85% of the row so long content can still breathe.
+            "max-w-[calc(100%-3rem)] sm:max-w-[85%]",
+            isUser
+              ? "items-start rounded-2xl rounded-tl-sm bg-emerald-600 dark:bg-emerald-700 px-4 py-2.5 text-white"
+              : "items-end rounded-2xl rounded-tr-sm bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 px-4 py-3 w-full sm:flex-1"
+          )}
+        >
+          {/* Name label */}
+          <div
+            className={cn(
+              "mb-1 text-xs font-semibold",
+              isUser
+                ? "text-emerald-50"
+                : "text-zinc-500 dark:text-zinc-400"
+            )}
+          >
             {isUser ? "You" : "Assistant"}
           </div>
 
@@ -461,11 +488,11 @@ function MessageBubbleImpl({
 
           {/* Main content */}
           {isUser ? (
-            <div className="whitespace-pre-wrap break-words text-[15px] leading-7 text-zinc-800 dark:text-zinc-100">
+            <div className="whitespace-pre-wrap break-words text-[15px] leading-7 text-white">
               {content}
             </div>
           ) : (
-            <div className="prose prose-sm dark:prose-invert max-w-none text-[15px] leading-7 text-zinc-800 dark:text-zinc-100 [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
+            <div className="prose prose-sm dark:prose-invert max-w-none w-full text-[15px] leading-7 text-zinc-800 dark:text-zinc-100 [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
               {/* Visual progress bar at the top of a streaming map-reduce response */}
               {progressInfo && <StreamingProgressBar info={progressInfo} />}
 

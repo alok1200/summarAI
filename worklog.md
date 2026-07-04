@@ -103,3 +103,35 @@ Stage Summary:
 - Task B (auth-based routing) is fully working: logged-out users see ONLY the LoginScreen (with login + signup tabs), logged-in users see the home/chat screen. The auth gate is in page.tsx lines 513-523.
 - Files created: /home/z/my-project/src/lib/llm.ts
 - Files modified: /home/z/my-project/src/app/api/youtube-interview/route.ts, /home/z/my-project/src/app/api/youtube-summary/route.ts, /home/z/my-project/src/app/api/chat/route.ts
+
+---
+Task ID: youtube-502-real-fix
+Agent: main
+Task: Fix the persistent 502 error during YouTube interview Q&A generation. The previous retry-based fix didn't work because the 502 was happening at the proxy layer, not the SDK layer.
+
+Work Log:
+- Investigated dev log: POST /api/chat 200 in 71s — the LLM call took 71 seconds to complete, then returned 200. The user saw 502 because the preview proxy (between browser and dev server) has a 60-second timeout and returned 502 "Gateway Timeout" before the Next.js function finished.
+- Confirmed retry logic was useless here because the error never reached the Next.js catch block — the proxy cut the connection first.
+- Tested whether Z.ai SDK supports real streaming: confirmed it does. `zai.chat.completions.create({ stream: true })` returns a ReadableStream whose async iterator yields Uint8Array chunks containing SSE-formatted data (each line: `data: {"choices":[{"delta":{"content":"..."}}]}`).
+- Rewrote /home/z/my-project/src/lib/llm.ts:
+  * Added SSEParser class to parse incoming SSE chunks and extract content deltas (handles partial chunks split across Uint8Array yields via line buffering)
+  * Added chatCompleteStream() — opens a streaming LLM call (with retry on transient errors during the initial connection only), returns a ReadableStream<Uint8Array> that yields content deltas as they arrive
+  * Added visionCompleteStream() — same pattern for the vision endpoint
+  * Added streamHeaderAndLLM(header, llmStream) — emits a static header first, then pipes the LLM stream through, used by YouTube routes
+  * Kept the existing chatComplete/visionComplete/streamTextResponse for backward compatibility
+- Updated /api/chat/route.ts: replaced the await-full-completion + fake-typing-stream pattern with chatCompleteStream() / visionCompleteStream() piped directly to the HTTP response. Removed the artificial 12ms-per-token delay.
+- Updated /api/youtube-summary/route.ts: replaced await + streamTextResponse with chatCompleteStream() + streamHeaderAndLLM(header, stream).
+- Updated /api/youtube-interview/route.ts: same change as summary.
+- TypeScript: clean (tsc --noEmit)
+- ESLint: clean (eslint .)
+- Restarted dev server and ran end-to-end tests with curl --timing:
+  * /api/chat (1-paragraph answer): first byte 1.16s (was 71s), total 2.09s, HTTP 200
+  * /api/youtube-summary (manual transcript): first byte 0.59s, total 2.61s, HTTP 200, 1.26KB structured summary
+  * /api/youtube-interview (10 questions, manual transcript): first byte 0.95s (was 60+s), total 22.3s, HTTP 200, 8.4KB full Q&A with cheat-sheet
+- All first-byte times are now well under 2 seconds, which means the proxy connection stays alive throughout the generation and no more 502s should occur.
+
+Stage Summary:
+- The root cause was FAKE streaming (await full completion, then re-emit char-by-char). The first byte reached the browser only after the entire LLM generation finished (60-90 seconds for 15-question interview Q&A), which exceeded the preview proxy's 60-second timeout and produced 502.
+- The fix is REAL streaming: pipe the Z.ai SDK's streaming ReadableStream directly to the HTTP response. First token now arrives in <1 second, keeping the proxy connection alive.
+- Files modified: /home/z/my-project/src/lib/llm.ts, /home/z/my-project/src/app/api/chat/route.ts, /home/z/my-project/src/app/api/youtube-summary/route.ts, /home/z/my-project/src/app/api/youtube-interview/route.ts
+- Dev server is running on port 3000, ready for the user to test.

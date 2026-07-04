@@ -9,7 +9,7 @@ import {
   fetchTranscriptWithRetry,
   parseUserTranscript,
 } from "@/lib/youtube-transcript";
-import { chatComplete, streamTextResponse } from "@/lib/llm";
+import { chatCompleteStream, streamHeaderAndLLM } from "@/lib/llm";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -149,16 +149,13 @@ export async function POST(req: NextRequest) {
       `Transcript (with timestamps):\n\n${truncated}\n\n` +
       `Please provide your structured summary now.`;
 
-    const content: string = await chatComplete([
+    // REAL STREAMING: pipe the LLM's streaming response directly so the
+    // first token reaches the browser in ~1 second. This prevents the
+    // preview proxy from returning 502 on long generations.
+    const llmStream = await chatCompleteStream([
       { role: "system", content: systemPrompt },
       { role: "user", content: userMessage },
     ]);
-
-    if (!content || content.trim().length === 0) {
-      throw new Error(
-        "The AI service returned an empty response. This usually means the gateway is overloaded — please try again in a moment."
-      );
-    }
 
     const sourceLabel = isManual ? " (manual paste)" : "";
     const header =
@@ -174,7 +171,7 @@ export async function POST(req: NextRequest) {
       (instructions ? `**Your instructions:** ${instructions}\n` : "") +
       `\n---\n\n`;
 
-    return streamTextResponse(header, content);
+    return streamHeaderAndLLM(header, llmStream);
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Unknown error";
     const code = (err as any)?.code;

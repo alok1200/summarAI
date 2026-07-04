@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
 import {
-  chatComplete,
-  visionComplete,
+  chatCompleteStream,
+  visionCompleteStream,
   type ChatMessage as LlmChatMessage,
   type VisionMessage,
 } from "@/lib/llm";
@@ -124,55 +124,40 @@ export async function POST(req: NextRequest) {
     const hasImages =
       !!lastUserMessage?.attachments?.some((a) => a.kind === "image" && a.dataUrl);
 
-    let content: string;
-
+    // REAL STREAMING: pipe the LLM's streaming response directly to the
+    // client so the first token arrives in ~1 second. This prevents the
+    // preview proxy from returning 502 "Gateway Timeout" on long generations
+    // (which previously happened because we awaited the full completion
+    // before sending any bytes back).
+    let llmStream: ReadableStream<Uint8Array>;
     if (hasImages && lastUserMessage) {
-      // Use the vision API for the latest user message with images.
-      // Earlier user messages with images: convert to text-only descriptors.
       const visionMessages: VisionMessage[] = [];
-
       visionMessages.push({ role: "system", content: systemPrompt });
-
       for (let i = 0; i < cleaned.length; i++) {
         const m = cleaned[i];
         if (i === realLastUserIdx) {
-          // Build multimodal content for this message
           const parts: Array<{ type: "text"; text: string } | { type: "image_url"; image_url: { url: string } }> = [];
           const textContent = buildMessageText({
             ...m,
-            // For the last message, don't include the "[Image attached]" placeholder
-            // since we're attaching real images.
             attachments: m.attachments?.filter((a) => a.kind !== "image"),
           });
           if (textContent.trim()) {
             parts.push({ type: "text", text: textContent });
           } else {
-            parts.push({
-              type: "text",
-              text: "Please analyze the attached image(s).",
-            });
+            parts.push({ type: "text", text: "Please analyze the attached image(s)." });
           }
           for (const a of m.attachments ?? []) {
             if (a.kind === "image" && a.dataUrl) {
-              parts.push({
-                type: "image_url",
-                image_url: { url: a.dataUrl },
-              });
+              parts.push({ type: "image_url", image_url: { url: a.dataUrl } });
             }
           }
           visionMessages.push({ role: "user", content: parts });
         } else {
-          // Earlier message: text only
-          visionMessages.push({
-            role: m.role,
-            content: buildMessageText(m),
-          });
+          visionMessages.push({ role: m.role, content: buildMessageText(m) });
         }
       }
-
-      content = await visionComplete(visionMessages);
+      llmStream = await visionCompleteStream(visionMessages);
     } else {
-      // Plain text chat — include text-file content inline.
       const fullMessages: LlmChatMessage[] = [
         { role: "system", content: systemPrompt },
         ...cleaned.map((m) => ({
@@ -180,24 +165,10 @@ export async function POST(req: NextRequest) {
           content: buildMessageText(m),
         })),
       ];
-
-      content = await chatComplete(fullMessages);
+      llmStream = await chatCompleteStream(fullMessages);
     }
 
-    // Stream the response back token-by-token for a typing effect.
-    const encoder = new TextEncoder();
-    const stream = new ReadableStream({
-      async start(controller) {
-        const tokens = content.match(/\s+|\S+/g) ?? [content];
-        for (const token of tokens) {
-          controller.enqueue(encoder.encode(token));
-          await new Promise((r) => setTimeout(r, 12));
-        }
-        controller.close();
-      },
-    });
-
-    return new Response(stream, {
+    return new Response(llmStream, {
       headers: {
         "Content-Type": "text/plain; charset=utf-8",
         "Cache-Control": "no-cache, no-transform",

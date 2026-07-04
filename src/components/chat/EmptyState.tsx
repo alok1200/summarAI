@@ -44,6 +44,9 @@ export function EmptyState({ onPickPrompt }: EmptyStateProps) {
           <div className="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-emerald-400 to-emerald-600 text-white shadow-lg">
             <Sparkles className="h-7 w-7" />
           </div>
+          <div className="mb-2 text-2xl font-semibold tracking-tight text-zinc-800 dark:text-zinc-100">
+            Summar<span className="text-emerald-500">AI</span>
+          </div>
           <h1 className="text-3xl font-semibold text-zinc-800 dark:text-zinc-100">
             How can I help you today?
           </h1>

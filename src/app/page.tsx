@@ -707,11 +707,8 @@ export default function Home() {
             <div className="flex h-6 w-6 items-center justify-center rounded-md bg-gradient-to-br from-emerald-400 to-emerald-600">
               <Sparkles className="h-3.5 w-3.5 text-white" />
             </div>
-            <span className="text-sm font-semibold text-zinc-800 dark:text-zinc-100">
-              ChatGPT
-            </span>
-            <span className="rounded-md bg-zinc-100 dark:bg-zinc-800 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
-              Z.ai
+            <span className="text-sm font-semibold text-zinc-800 dark:text-zinc-100 tracking-tight">
+              Summar<span className="text-emerald-500">AI</span>
             </span>
           </div>
         </header>

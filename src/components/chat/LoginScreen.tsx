@@ -119,7 +119,10 @@ export function LoginScreen() {
           <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-emerald-400 to-emerald-600 text-white shadow-lg">
             <Sparkles className="h-7 w-7" />
           </div>
-          <h1 className="text-2xl font-semibold text-zinc-800 dark:text-zinc-100">
+          <div className="mb-1 text-2xl font-semibold tracking-tight text-zinc-800 dark:text-zinc-100">
+            Summar<span className="text-emerald-500">AI</span>
+          </div>
+          <h1 className="text-lg font-semibold text-zinc-700 dark:text-zinc-200">
             {mode === "login" ? "Welcome back" : "Create your account"}
           </h1>
           <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">

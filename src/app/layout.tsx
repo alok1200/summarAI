@@ -16,11 +16,11 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "ChatGPT-style UI — powered by Z.ai",
+  title: "SummarAI — AI chat & YouTube summarizer",
   description:
-    "A ChatGPT-style chat interface built with Next.js, Tailwind CSS, and Z.ai SDK.",
-  keywords: ["ChatGPT", "Z.ai", "Next.js", "TypeScript", "Tailwind CSS"],
-  authors: [{ name: "Z.ai Team" }],
+    "SummarAI is an AI chat assistant with YouTube video summarization, interview Q&A generation, and conversational video Q&A.",
+  keywords: ["SummarAI", "AI chat", "YouTube summarizer", "interview Q&A", "Next.js"],
+  authors: [{ name: "SummarAI" }],
   icons: {
     icon: "https://z-cdn.chatglm.cn/z-ai/static/logo.svg",
   },

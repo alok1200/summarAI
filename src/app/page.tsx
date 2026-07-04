@@ -47,10 +47,18 @@ export default function Home() {
 
   const { user, loading: authLoading, fetchMe } = useAuth();
 
-  // Fetch current user on mount
+  // Verify the session cookie ONCE on the initial app load. After a
+  // successful login, setUser() is called from the LoginScreen with the
+  // user object returned by the POST response — at that point authLoading
+  // is already false, so this effect skips the redundant (and potentially
+  // failing) re-fetch that was previously kicking users back to the
+  // login screen.
   useEffect(() => {
-    fetchMe();
-  }, [fetchMe]);
+    if (authLoading) {
+      fetchMe();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     setHasHydrated(true);

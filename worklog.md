@@ -829,3 +829,231 @@ Stage Summary:
     tsconfig.json                 (added "types": ["bun-types"])
     .env.example                  (YOUTUBE_PROXY_URL + backup env vars documented)
     .gitignore                    (added /backups/)
+
+---
+Task ID: 18
+Agent: main
+Task: Make the application production-ready (security, observability, robustness, ops)
+
+Work Log:
+
+=== AUDIT — found 12 production-readiness gaps ===
+
+The previous tasks (16, 17) added UI polish, tests, YouTube bot-block
+mitigation, and SQLite backups — but the app still had critical production
+gaps. I audited every API route and the next.config.ts, and found:
+
+  P0 (security):
+  1. /api/chat, /api/youtube-summary, /api/youtube-interview,
+     /api/youtube-load had NO authentication — anyone on the internet
+     could hit them and drain the LLM API budget.
+  2. typescript.ignoreBuildErrors was `true` — type errors shipped to prod.
+  3. No security headers (X-Frame-Options, X-Content-Type-Options, etc.).
+  4. No request body size limits — 10GB POST would OOM the process.
+  5. Raw error messages leaked to clients (DB connection strings, paths).
+
+  P1 (operational):
+  6. No health-check endpoint for k8s / load balancer probes.
+  7. No structured logging — ad-hoc console.error with inconsistent prefixes.
+  8. No per-request correlation ID.
+  9. No rate limiting — a single user could flood the API.
+  10. /api root returned "Hello, world!" (useless).
+
+  P2 (maintenance):
+  11. No expired-session cleanup — sessions table grew forever.
+  12. No production deployment documentation.
+
+=== FIXES — all 12 gaps addressed ===
+
+--- P0: Security ---
+
+(1) AUTH GUARD — new src/lib/require-auth.ts
+  - `requireAuth(req)` returns `{ ok: true, user }` or
+    `{ ok: false, response: 401 }`.
+  - Applied to: /api/chat, /api/youtube-summary, /api/youtube-interview,
+    /api/youtube-load.
+  - The 4 auth endpoints (login, signup, logout, me) don't need it (they
+    ARE the auth flow). /api/health is intentionally open (probes must
+    work without a session). /api/youtube-meta stays open (public oEmbed
+    data only).
+  - End-to-end tested: unauthenticated /api/chat now returns 401.
+
+(2) BUILD STRICTNESS — next.config.ts
+  - Set `typescript.ignoreBuildErrors: false` (was `true`).
+  - Set `poweredByHeader: false` (was default `true` — leaked Next version).
+  - Re-enabled `reactStrictMode: true` (was `false`).
+  - Added async `headers()` config setting security headers on every
+    route + long-lived immutable cache on `/_next/static/*`.
+
+(3) SECURITY HEADERS — new src/proxy.ts (Edge runtime)
+  - Renamed from `middleware.ts` (Next.js 16 deprecated `middleware` in
+    favor of `proxy`; the function export is now `proxy` not `middleware`).
+  - Uses Web Crypto API (`crypto.randomUUID()`) instead of Node's
+    `crypto.randomBytes` (Edge runtime doesn't support Node built-ins).
+  - Sets on every response: X-Content-Type-Options: nosniff,
+    X-Frame-Options: DENY, Referrer-Policy: strict-origin-when-cross-origin,
+    Permissions-Policy: camera=(), microphone=(), geolocation=(),
+    browsing-topics=(), X-DNS-Prefetch-Control: off.
+  - Strips `x-powered-by` (defense-in-depth; also disabled in next.config).
+  - Generates and propagates `x-request-id` for log correlation.
+  - Matcher excludes static assets (_next/static, _next/image, favicon,
+    robots.txt, logo.svg) — they don't need per-request work.
+
+(4) BODY SIZE LIMITS — new src/lib/api-helpers.ts:readJsonBody
+  - Reads body as text, checks byte length against limit, THEN parses.
+  - Default 2 MB (configurable via MAX_BODY_BYTES env).
+  - Stricter limits on auth endpoints: login 1 KB, signup 4 KB.
+  - Returns 413 Payload Too Large on overflow.
+  - Returns 400 Bad Request on malformed JSON.
+
+(5) ERROR SANITIZATION — src/lib/api-helpers.ts:sanitizeError
+  - In production: replaces internal error messages with generic
+    "Internal server error. Please try again." + a random 8-char `digest`.
+  - In dev: returns the raw error message for debugging.
+  - Supports opt-in `safeMessage` property for code that knows its
+    message is user-safe (e.g. "Video not found").
+  - Applied to all API route catch blocks + the new jsonError helper.
+
+--- P1: Operational ---
+
+(6) HEALTH CHECK — new src/app/api/health/route.ts
+  - GET /api/health returns 200 with `{status, uptimeSec, memoryMb,
+    checks: {db: {ok, error, durationMs}}}`.
+  - Returns 503 if DB unreachable (so load balancer can route around).
+  - NOT authenticated (probes must work without a session).
+  - NOT rate-limited (~100 byte response, single count query).
+  - Includes `Cache-Control: no-store` so probes don't get cached 200s
+    while the server is down.
+  - Also probabilistically runs expired-session cleanup (~1% of hits).
+
+(7) STRUCTURED LOGGER — new src/lib/logger.ts
+  - JSON to stdout (info) / stderr (error), one line per event.
+  - Pretty-printed in dev for readability.
+  - 4 levels: debug / info / warn / error.
+  - LOG_LEVEL env var controls minimum level (default: info in prod,
+    debug in dev).
+  - Every log includes: ts, level, event (dotted name like
+    "chat.request"), requestId, userId (when authed), durationMs.
+  - Replaced all `console.error("[route] ...")` calls with structured
+    `logger.error("route.event", {...})` calls.
+
+(8) REQUEST-ID — generated in src/proxy.ts, threaded everywhere
+  - Minted per-request (or preserved from upstream proxy if present).
+  - Set on request headers (so route handlers can read it).
+  - Set on response headers (so clients can correlate).
+  - Included in every log line.
+
+(9) RATE LIMITER — new src/lib/rate-limit.ts
+  - In-memory sliding-window, per (userId, route) key.
+  - Default 10 req/min per user on AI endpoints (RATE_LIMIT_AI_PER_MIN env).
+  - Returns 429 with standard X-RateLimit-* + Retry-After headers.
+  - Periodic sweep (every 5 min) evicts stale buckets.
+  - Applied to: /api/chat, /api/youtube-summary, /api/youtube-interview,
+    /api/youtube-load.
+  - End-to-end tested: 12 rapid requests → first 9 OK, last 3 = 429.
+  - Single-process design (Map-based). For multi-instance deployments,
+    swap the `store` Map for Redis (documented in code comment).
+
+(10) USEFUL /api ROOT — replaced "Hello, world!"
+  - Now returns service descriptor: name, version, list of endpoints
+    with auth/rate-limit annotations, link to docs.
+
+--- P2: Maintenance ---
+
+(11) SESSION CLEANUP — new src/lib/session-cleanup.ts
+  - `cleanupExpiredSessions()` deletes rows where expiresAt < now.
+  - `maybeCleanupExpiredSessions(0.01)` runs it ~1% of the time.
+  - Called from /api/health (frequently-hit, no auth needed).
+  - Avoids needing a separate cron job.
+
+(12) DEPLOYMENT DOCS — new PRODUCTION.md
+  - Pre-deployment checklist (env vars, DB, secrets, cron).
+  - Build + run instructions (systemd unit example).
+  - Caddy reverse proxy config.
+  - DB backup cron setup.
+  - Health check integration (Caddy + k8s examples).
+  - Log levels + grep examples (journalctl + jq).
+  - Security overview (auth, rate limiting, body limits, headers,
+    error sanitization, what's NOT included and why).
+  - Monitoring recommendations (Sentry, Prometheus, uptime).
+  - Updating procedure.
+  - Troubleshooting guide for common prod issues.
+
+--- TESTS — 32 new tests, 0 regressions ---
+
+  New test files (32 tests, 60 assertions):
+    src/lib/__tests__/rate-limit.test.ts   — 11 tests
+      (limit enforcement, 429 + headers, per-identifier isolation,
+       per-route isolation, window reset, remaining counter,
+       aiRateLimitConfig defaults/env/invalid/zero)
+    src/lib/__tests__/api-helpers.test.ts  — 16 tests
+      (readJsonBody: valid/malformed/oversize/empty/generic-type;
+       sanitizeError: dev message, prod generic, safeMessage, non-Error,
+       null/undefined, digest uniqueness;
+       jsonError: message+digest, custom digest, extra fields)
+    src/lib/__tests__/logger.test.ts       — 5 tests
+      (4 levels exposed, no-throw smoke test, complex payload,
+       requestIdFromHeaders reads/missing/undefined)
+
+  Full suite: 153 pass / 0 fail / 313 expect() calls / 8 files.
+  Type check: clean (npx tsc --noEmit → no output).
+  Lint: 0 errors, 3 pre-existing warnings (in files I didn't touch).
+  Build: clean (no warnings, no errors).
+
+--- END-TO-END VERIFICATION ---
+
+  Built and started the production server (NODE_ENV=production
+  bun .next/standalone/server.js). All smoke tests passed:
+
+  ✓ GET /api/health → 200 OK with DB ok=true, security headers, x-request-id
+  ✓ POST /api/chat (no auth) → 401 Unauthorized (was previously open!)
+  ✓ POST /api/auth/signup → 200, sets session cookie, returns user
+  ✓ GET /api/auth/me (with cookie) → returns authenticated user
+  ✓ POST /api/chat (with cookie) → 200, streams LLM response
+  ✓ Rate limit: 12 rapid requests → first 9 OK, last 3 = 429 with
+    Retry-After header
+  ✓ POST /api/auth/logout → 200, clears cookie
+  ✓ Security headers on every response: X-Content-Type-Options,
+    X-Frame-Options, Referrer-Policy, Permissions-Policy,
+    X-DNS-Prefetch-Control, x-request-id
+  ✓ Structured JSON logs in prod: {"ts":"...","level":"info",
+    "event":"auth.signup.success","requestId":"...","userId":"...",
+    "email":"..."}
+
+Stage Summary:
+
+  The app went from "works in dev" to "safe to deploy to production".
+  Critical security holes (unauthenticated LLM endpoints, type errors
+  bypassing the build, leaked error messages, no body limits) are closed.
+  Operational gaps (no health check, no logging, no rate limiting) are
+  filled. Maintenance footguns (no session cleanup, no deployment docs)
+  are addressed.
+
+  Files added:
+    src/lib/require-auth.ts          (auth guard helper)
+    src/lib/rate-limit.ts            (in-memory rate limiter)
+    src/lib/logger.ts                (structured JSON logger)
+    src/lib/api-helpers.ts           (readJsonBody, sanitizeError, jsonError)
+    src/lib/session-cleanup.ts       (expired-session sweeper)
+    src/proxy.ts                     (Edge proxy: req-id + security headers)
+    src/app/api/health/route.ts      (health check endpoint)
+    src/lib/__tests__/rate-limit.test.ts
+    src/lib/__tests__/api-helpers.test.ts
+    src/lib/__tests__/logger.test.ts
+    PRODUCTION.md                    (deployment guide)
+
+  Files changed:
+    next.config.ts                   (ignoreBuildErrors=false, poweredByHeader=false, strictMode=true, headers)
+    src/app/api/route.ts             (useful service descriptor)
+    src/app/api/chat/route.ts        (auth + rate limit + body limit + logger)
+    src/app/api/youtube-summary/route.ts   (auth + rate limit + body limit + logger)
+    src/app/api/youtube-interview/route.ts (auth + rate limit + body limit + logger)
+    src/app/api/youtube-load/route.ts      (auth + rate limit + body limit + logger)
+    src/app/api/auth/login/route.ts  (body limit + logger + sanitize)
+    src/app/api/auth/signup/route.ts (body limit + logger + sanitize + length caps)
+    src/app/api/auth/me/route.ts     (logger)
+    src/app/api/auth/logout/route.ts (logger + sanitize)
+    .env.example                     (RATE_LIMIT_AI_PER_MIN, MAX_BODY_BYTES, LOG_LEVEL)
+
+  Files removed:
+    src/middleware.ts                (renamed to src/proxy.ts for Next.js 16)

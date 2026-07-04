@@ -27,6 +27,10 @@ import {
   groupLabel,
   type TranscriptChunk,
 } from "@/lib/youtube-chunks";
+import { requireAuth } from "@/lib/require-auth";
+import { rateLimit, aiRateLimitConfig } from "@/lib/rate-limit";
+import { readJsonBody, sanitizeError } from "@/lib/api-helpers";
+import { logger } from "@/lib/logger";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -247,9 +251,42 @@ function buildReduceMessages(
 }
 
 export async function POST(req: NextRequest) {
+  // ---------- AUTH ----------
+  const guard = await requireAuth(req);
+  if (!guard.ok) return guard.response;
+  const { user } = guard;
+
+  // ---------- RATE LIMIT ----------
+  const rl = rateLimit(aiRateLimitConfig(user.id, "youtube-summary"));
+  if (!rl.ok) {
+    logger.warn("youtube-summary.rate_limited", { userId: user.id });
+    return rl.response;
+  }
+
+  // ---------- BODY (size-capped, JSON-validated) ----------
+  // Allow larger bodies because pasted transcripts can be big (~500KB max).
+  const bodyResult = await readJsonBody<{
+    url?: string;
+    startTime?: string;
+    endTime?: string;
+    instructions?: string;
+    transcript?: string;
+    language?: string;
+  }>(req, 2 * 1024 * 1024);
+  if (!bodyResult.ok) return bodyResult.response;
+  const body = bodyResult.value;
+
+  const requestId = req.headers.get("x-request-id") ?? "no-req-id";
+  logger.info("youtube-summary.request", {
+    userId: user.id,
+    requestId,
+    hasUrl: !!body.url,
+    hasManualTranscript: !!body.transcript,
+    language: body.language,
+  });
+
   let parsedVideoId: string | null = null;
   try {
-    const body = await req.json();
     const url: string = body.url ?? "";
     const startTimeStr: string = body.startTime ?? "";
     const endTimeStr: string = body.endTime ?? "";
@@ -581,8 +618,14 @@ export async function POST(req: NextRequest) {
     });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Unknown error";
-    const code = (err as any)?.code;
-    console.error("[youtube-summary] error:", message, "code:", code);
+    const code = (err as { code?: string })?.code;
+    logger.error("youtube-summary.failed", {
+      userId: user.id,
+      requestId,
+      error: message,
+      code,
+      videoId: parsedVideoId,
+    });
 
     let videoMeta: VideoMeta | null = null;
     if (parsedVideoId) {
@@ -616,6 +659,7 @@ export async function POST(req: NextRequest) {
     return jsonResponse(500, {
       error: friendlyMsg,
       videoMeta: metaPayload,
+      digest: sanitizeError(err).digest,
     });
   }
 }

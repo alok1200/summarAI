@@ -24,6 +24,10 @@ import {
   shouldUseMapReduce,
   type TranscriptChunk,
 } from "@/lib/youtube-chunks";
+import { requireAuth } from "@/lib/require-auth";
+import { rateLimit, aiRateLimitConfig } from "@/lib/rate-limit";
+import { readJsonBody, sanitizeError } from "@/lib/api-helpers";
+import { logger } from "@/lib/logger";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -242,9 +246,35 @@ function buildReduceMessages(
 }
 
 export async function POST(req: NextRequest) {
+  // ---------- AUTH ----------
+  const guard = await requireAuth(req);
+  if (!guard.ok) return guard.response;
+  const { user } = guard;
+
+  // ---------- RATE LIMIT ----------
+  const rl = rateLimit(aiRateLimitConfig(user.id, "youtube-interview"));
+  if (!rl.ok) {
+    logger.warn("youtube-interview.rate_limited", { userId: user.id });
+    return rl.response;
+  }
+
+  // ---------- BODY ----------
+  const bodyResult = await readJsonBody<InterviewRequestBody>(req, 2 * 1024 * 1024);
+  if (!bodyResult.ok) return bodyResult.response;
+  const body = bodyResult.value;
+
+  const requestId = req.headers.get("x-request-id") ?? "no-req-id";
+  logger.info("youtube-interview.request", {
+    userId: user.id,
+    requestId,
+    hasUrl: !!body.url,
+    hasManualTranscript: !!body.transcript,
+    difficulty: body.difficulty,
+    questionCount: body.questionCount,
+  });
+
   let parsedVideoId: string | null = null;
   try {
-    const body = (await req.json()) as InterviewRequestBody;
     const url: string = body.url ?? "";
     const startTimeStr: string = body.startTime ?? "";
     const endTimeStr: string = body.endTime ?? "";
@@ -486,8 +516,14 @@ export async function POST(req: NextRequest) {
     });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Unknown error";
-    const code = (err as any)?.code;
-    console.error("[youtube-interview] error:", message, "code:", code);
+    const code = (err as { code?: string })?.code;
+    logger.error("youtube-interview.failed", {
+      userId: user.id,
+      requestId,
+      error: message,
+      code,
+      videoId: parsedVideoId,
+    });
 
     let videoMeta: VideoMeta | null = null;
     if (parsedVideoId) {
@@ -522,6 +558,7 @@ export async function POST(req: NextRequest) {
     return jsonResponse(500, {
       error: friendlyMsg,
       videoMeta: metaPayload,
+      digest: sanitizeError(err).digest,
     });
   }
 }

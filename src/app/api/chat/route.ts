@@ -10,6 +10,10 @@ import {
   TIMESTAMP_RULES,
   buildLanguageInstruction,
 } from "@/lib/youtube-transcript";
+import { requireAuth } from "@/lib/require-auth";
+import { rateLimit, aiRateLimitConfig } from "@/lib/rate-limit";
+import { readJsonBody, sanitizeError } from "@/lib/api-helpers";
+import { logger } from "@/lib/logger";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -299,8 +303,40 @@ function buildMessageText(m: ChatMessagePayload): string {
 }
 
 export async function POST(req: NextRequest) {
+  // ---------- AUTH ----------
+  const guard = await requireAuth(req);
+  if (!guard.ok) return guard.response;
+  const { user } = guard;
+
+  // ---------- RATE LIMIT (per-user, 10/min by default) ----------
+  const rl = rateLimit(aiRateLimitConfig(user.id, "chat"));
+  if (!rl.ok) {
+    logger.warn("chat.rate_limited", { userId: user.id });
+    return rl.response;
+  }
+
+  // ---------- BODY (size-capped, JSON-validated) ----------
+  const bodyResult = await readJsonBody<{
+    messages?: ChatMessagePayload[];
+    videoContext?: VideoContextPayload;
+    systemPrompt?: string;
+  }>(req);
+  if (!bodyResult.ok) return bodyResult.response;
+  const body = bodyResult.value;
+
+  const requestId = req.headers.get("x-request-id") ?? "no-req-id";
+  logger.info("chat.request", {
+    userId: user.id,
+    requestId,
+    messageCount: body.messages?.length ?? 0,
+    hasVideoContext: !!body.videoContext,
+    hasImages:
+      body.messages?.some((m) =>
+        m.attachments?.some((a) => a.kind === "image" && a.dataUrl)
+      ) ?? false,
+  });
+
   try {
-    const body = await req.json();
     const messages: ChatMessagePayload[] = body.messages ?? [];
     const videoContext: VideoContextPayload | undefined = body.videoContext;
 
@@ -454,9 +490,15 @@ export async function POST(req: NextRequest) {
       },
     });
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : "Unknown error";
+    const sanitized = sanitizeError(err);
+    logger.error("chat.failed", {
+      userId: user.id,
+      requestId,
+      error: err instanceof Error ? err.message : String(err),
+      digest: sanitized.digest,
+    });
     return new Response(
-      JSON.stringify({ error: message || "Chat request failed" }),
+      JSON.stringify({ error: sanitized.message, digest: sanitized.digest }),
       { status: 500, headers: { "Content-Type": "application/json" } }
     );
   }

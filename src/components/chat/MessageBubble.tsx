@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useState } from "react";
+import { memo, useState, useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
@@ -13,6 +13,9 @@ import {
   Image as ImageIcon,
   ChevronDown,
   ChevronRight,
+  RefreshCw,
+  ExternalLink,
+  Download,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { Attachment, YouTubeMeta } from "@/store/chat";
@@ -24,6 +27,123 @@ interface MessageBubbleProps {
   isStreaming?: boolean;
   attachments?: Attachment[];
   youtubeMeta?: YouTubeMeta;
+  /** Video ID for the active YouTube context — used to linkify [MM:SS] timestamps. */
+  videoId?: string;
+  /** Whether this is the most recent assistant message (eligible for regenerate). */
+  isLatestAssistant?: boolean;
+  /** Called when the user clicks the Regenerate button on this message. */
+  onRegenerate?: () => void;
+}
+
+/* ------------------------------------------------------------------ */
+/* Helpers                                                             */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Convert [MM:SS] or [H:MM:SS] timestamps in a string to markdown links that
+ * open the YouTube video at that timestamp. The timestamp text is preserved
+ * (so [3:45] becomes [3:45](https://youtu.be/VIDEO?t=225s)) — users see the
+ * same label but it's now clickable.
+ *
+ * If no videoId is provided, returns the input unchanged.
+ */
+function linkifyTimestamps(text: string, videoId?: string): string {
+  if (!videoId) return text;
+  // Match [MM:SS] or [H:MM:SS] or [HH:MM:SS], but not already-linkified ones.
+  // Avoid matching inside markdown link syntax: [...](...) — but for simplicity
+  // we just check that the bracket is not immediately followed by "(".
+  const tsRegex = /\[(\d{1,2}:\d{2}(?::\d{2})?)\](?!\()/g;
+  return text.replace(tsRegex, (full, ts: string) => {
+    const seconds = tsToSeconds(ts);
+    if (seconds === null) return full;
+    // Use youtu.be short link with t=Ns parameter (cleaner than watch?v=…&t=Ns)
+    const url = `https://youtu.be/${videoId}?t=${seconds}`;
+    // Escape the timestamp text inside the link label so it doesn't get
+    // re-parsed as markdown.
+    return `[${full}](${url})`;
+  });
+}
+
+function tsToSeconds(ts: string): number | null {
+  const parts = ts.split(":").map((p) => parseInt(p, 10));
+  if (parts.some((n) => isNaN(n))) return null;
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  return null;
+}
+
+/**
+ * Detect "✅ Chunk X/Y summarized" / "✅ Chunk X/Y analyzed" lines in the
+ * streaming content, and return a parsed progress object for the visual bar.
+ *
+ * Returns null when no map-reduce progress pattern is detected.
+ */
+interface ProgressInfo {
+  /** Total chunks to process. */
+  total: number;
+  /** Chunks completed so far. */
+  done: number;
+  /** Phase: "map" (per-chunk summaries being generated) | "reduce" (merging). */
+  phase: "map" | "reduce";
+}
+
+function parseProgress(content: string): ProgressInfo | null {
+  // Detect the "⏳ Processing N chunks in parallel" header to get the total.
+  const headerMatch = content.match(
+    /⏳\s*\*\*Processing\s+(\d+)\s+chunks in parallel\*\*/
+  );
+  if (!headerMatch) return null;
+  const total = parseInt(headerMatch[1], 10);
+
+  // Find the latest "✅ Chunk X/Y" line — there may be several accumulated.
+  const chunkLines = content.matchAll(/✅\s*Chunk\s+(\d+)\/(\d+)/g);
+  let done = 0;
+  for (const m of chunkLines) {
+    const d = parseInt(m[1], 10);
+    if (d > done) done = d;
+  }
+
+  // Reduce phase: "🔄 Merging…" or "🎯 Generating…"
+  const reduceMatch =
+    /(?:🔄\s*\*\*Merging|🎯\s*\*\*Generating)/.test(content);
+  if (reduceMatch) {
+    return { total, done: total, phase: "reduce" };
+  }
+  return { total, done, phase: "map" };
+}
+
+/* ------------------------------------------------------------------ */
+/* Sub-components                                                      */
+/* ------------------------------------------------------------------ */
+
+function StreamingProgressBar({ info }: { info: ProgressInfo }) {
+  const pct =
+    info.phase === "reduce"
+      ? 100
+      : info.total === 0
+      ? 0
+      : Math.round((info.done / info.total) * 100);
+  const label =
+    info.phase === "reduce"
+      ? `Merging ${info.total} chunk summaries into final answer…`
+      : `Processing chunk ${info.done} of ${info.total}…`;
+  return (
+    <div className="my-3 rounded-lg border border-emerald-200 dark:border-emerald-800 bg-emerald-50/50 dark:bg-emerald-950/30 p-3">
+      <div className="flex items-center justify-between text-[11px] font-medium text-emerald-700 dark:text-emerald-300 mb-1.5">
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
+          {label}
+        </span>
+        <span>{pct}%</span>
+      </div>
+      <div className="h-1.5 w-full overflow-hidden rounded-full bg-emerald-100 dark:bg-emerald-900">
+        <div
+          className="h-full rounded-full bg-gradient-to-r from-emerald-400 to-emerald-600 transition-all duration-300 ease-out"
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+    </div>
+  );
 }
 
 function CodeBlock({ language, value }: { language: string; value: string }) {
@@ -203,19 +323,114 @@ function AttachmentList({ attachments }: { attachments: Attachment[] }) {
   );
 }
 
+/* ------------------------------------------------------------------ */
+/* Action bar (under each assistant message)                           */
+/* ------------------------------------------------------------------ */
+
+interface AssistantActionBarProps {
+  content: string;
+  videoId?: string;
+  isLatest?: boolean;
+  isStreaming?: boolean;
+  onRegenerate?: () => void;
+}
+
+function AssistantActionBar({
+  content,
+  videoId,
+  isLatest,
+  isStreaming,
+  onRegenerate,
+}: AssistantActionBarProps) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = () => {
+    // Copy the raw markdown content (without the streaming progress lines).
+    navigator.clipboard.writeText(content);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+
+  // Don't render the bar while the very first chunk is still streaming in —
+  // it would just be a row of buttons with nothing useful to act on yet.
+  if (isStreaming && !content.trim()) return null;
+
+  return (
+    <div className="mt-2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+      <button
+        onClick={handleCopy}
+        className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
+        title="Copy response"
+      >
+        {copied ? (
+          <>
+            <Check className="h-3 w-3" /> Copied
+          </>
+        ) : (
+          <>
+            <Copy className="h-3 w-3" /> Copy
+          </>
+        )}
+      </button>
+
+      {isLatest && !isStreaming && onRegenerate && (
+        <button
+          onClick={onRegenerate}
+          className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
+          title="Regenerate response"
+        >
+          <RefreshCw className="h-3 w-3" /> Regenerate
+        </button>
+      )}
+
+      {videoId && (
+        <a
+          href={`https://www.youtube.com/watch?v=${videoId}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-zinc-500 hover:text-red-600 dark:hover:text-red-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
+          title="Open video on YouTube"
+        >
+          <Youtube className="h-3 w-3" /> Open video
+        </a>
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Main MessageBubble                                                  */
+/* ------------------------------------------------------------------ */
+
 function MessageBubbleImpl({
   role,
   content,
   isStreaming,
   attachments,
   youtubeMeta,
+  videoId,
+  isLatestAssistant,
+  onRegenerate,
 }: MessageBubbleProps) {
   const isUser = role === "user";
+
+  // Linkify [MM:SS] timestamps in the assistant content (only when there's a
+  // video context for the link to point at).
+  const processedContent = useMemo(() => {
+    if (isUser) return content;
+    return linkifyTimestamps(content, videoId);
+  }, [content, isUser, videoId]);
+
+  // Parse the streaming content for the long-video progress bar.
+  const progressInfo = useMemo(
+    () => (isStreaming && !isUser ? parseProgress(content) : null),
+    [content, isStreaming, isUser]
+  );
 
   return (
     <div
       className={cn(
-        "group w-full px-4 py-6 md:px-8",
+        "group relative w-full px-4 py-6 md:px-8",
         isUser ? "bg-transparent" : "bg-zinc-50 dark:bg-zinc-900/40"
       )}
     >
@@ -251,6 +466,9 @@ function MessageBubbleImpl({
             </div>
           ) : (
             <div className="prose prose-sm dark:prose-invert max-w-none text-[15px] leading-7 text-zinc-800 dark:text-zinc-100 [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
+              {/* Visual progress bar at the top of a streaming map-reduce response */}
+              {progressInfo && <StreamingProgressBar info={progressInfo} />}
+
               <ReactMarkdown
                 components={{
                   code({ className, children, ...props }) {
@@ -277,14 +495,40 @@ function MessageBubbleImpl({
                   pre({ children }) {
                     return <>{children}</>;
                   },
+                  // Open all links in a new tab so the user doesn't lose their place
+                  // in the conversation (especially important for timestamp links).
+                  a({ href, children, ...props }) {
+                    return (
+                      <a
+                        href={href}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-emerald-600 dark:text-emerald-400 underline underline-offset-2 hover:text-emerald-700 dark:hover:text-emerald-300"
+                        {...props}
+                      >
+                        {children}
+                      </a>
+                    );
+                  },
                 }}
               >
-                {content || (isStreaming ? "…" : "")}
+                {processedContent || (isStreaming ? "…" : "")}
               </ReactMarkdown>
               {isStreaming && (
                 <span className="ml-0.5 inline-block h-4 w-2 animate-pulse bg-zinc-600 dark:bg-zinc-300 align-middle" />
               )}
             </div>
+          )}
+
+          {/* Action bar — only on completed assistant messages */}
+          {!isUser && (
+            <AssistantActionBar
+              content={content}
+              videoId={videoId}
+              isLatest={isLatestAssistant}
+              isStreaming={isStreaming}
+              onRegenerate={onRegenerate}
+            />
           )}
         </div>
       </div>

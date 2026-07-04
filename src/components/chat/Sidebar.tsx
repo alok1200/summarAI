@@ -12,8 +12,9 @@ import {
   Sun,
   Moon,
   LogOut,
+  Download,
 } from "lucide-react";
-import { useChatStore } from "@/store/chat";
+import { useChatStore, type Conversation } from "@/store/chat";
 import { useAuth } from "@/store/auth";
 import { cn } from "@/lib/utils";
 import { useTheme } from "next-themes";
@@ -29,6 +30,76 @@ import {
 
 interface SidebarProps {
   onClose?: () => void;
+}
+
+/**
+ * Build a Markdown representation of a conversation and trigger a browser
+ * download. Useful for saving a chat for later reference, sharing with a
+ * teammate, or pasting into another tool.
+ */
+function exportConversationAsMarkdown(convo: Conversation) {
+  const date = new Date(convo.createdAt).toISOString().slice(0, 10);
+  const lines: string[] = [];
+
+  lines.push(`# ${convo.title || "Untitled conversation"}`);
+  lines.push("");
+  lines.push(
+    `_Exported ${new Date().toLocaleString()} · ${convo.messages.length} messages_`
+  );
+  if (convo.videoContext) {
+    lines.push("");
+    lines.push(`**Video context:** [${convo.videoContext.title}](${convo.videoContext.url})`);
+    lines.push(`**Channel:** ${convo.videoContext.author}`);
+  }
+  lines.push("");
+  lines.push("---");
+  lines.push("");
+
+  for (const m of convo.messages) {
+    const time = new Date(m.createdAt).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+    if (m.role === "user") {
+      lines.push(`## 🧑 You · ${time}`);
+    } else {
+      lines.push(`## 🤖 Assistant · ${time}`);
+    }
+    if (m.youtubeMeta) {
+      lines.push("");
+      lines.push(
+        `> ▶️ **YouTube:** [${m.youtubeMeta.url}](${m.youtubeMeta.url})  ` +
+          `· ⏱ ${m.youtubeMeta.startTime ?? "0:00"} → ${m.youtubeMeta.endTime ?? "end"}`
+      );
+    }
+    if (m.attachments && m.attachments.length > 0) {
+      lines.push("");
+      lines.push(
+        `_Attachments: ${m.attachments.map((a) => a.name).join(", ")}_`
+      );
+    }
+    lines.push("");
+    lines.push(m.content || "_(empty)_");
+    lines.push("");
+    lines.push("---");
+    lines.push("");
+  }
+
+  const md = lines.join("\n");
+  const blob = new Blob([md], { type: "text/markdown;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  const safeTitle = (convo.title || "conversation")
+    .replace(/[^a-z0-9-_]+/gi, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 60)
+    .toLowerCase();
+  a.href = url;
+  a.download = `${date}-${safeTitle || "chat"}.md`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
 export function Sidebar({ onClose }: SidebarProps) {
@@ -62,6 +133,10 @@ export function Sidebar({ onClose }: SidebarProps) {
   const handleSelect = (id: string) => {
     setActive(id);
     onClose?.();
+  };
+
+  const handleExport = (convo: Conversation) => {
+    exportConversationAsMarkdown(convo);
   };
 
   const startEditing = (id: string, current: string) => {
@@ -174,6 +249,17 @@ export function Sidebar({ onClose }: SidebarProps) {
                           <button
                             onClick={(e) => {
                               e.stopPropagation();
+                              handleExport(c);
+                            }}
+                            className="p-1 rounded hover:bg-zinc-300 dark:hover:bg-zinc-700"
+                            aria-label="Export as Markdown"
+                            title="Export as Markdown"
+                          >
+                            <Download className="h-3 w-3" />
+                          </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
                               startEditing(c.id, c.title);
                             }}
                             className="p-1 rounded hover:bg-zinc-300 dark:hover:bg-zinc-700"
@@ -247,6 +333,17 @@ export function Sidebar({ onClose }: SidebarProps) {
                   <span>Dark mode</span>
                 </>
               )}
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onClick={() => {
+                const c = conversations.find((x) => x.id === activeId);
+                if (c) exportConversationAsMarkdown(c);
+              }}
+              className="cursor-pointer"
+              disabled={!activeId}
+            >
+              <Download className="mr-2 h-4 w-4" />
+              <span>Export current chat</span>
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem

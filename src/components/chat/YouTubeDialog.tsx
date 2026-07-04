@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
   Dialog,
   DialogContent,
@@ -26,7 +26,115 @@ import {
   AlertCircle,
   GraduationCap,
   MessageCircleQuestion,
+  Loader2,
 } from "lucide-react";
+
+/**
+ * Lightweight video preview card shown inside the YouTubeDialog as soon as the
+ * user pastes a valid URL. Fetches title + author + thumbnail from our own
+ * /api/youtube-meta endpoint (which proxies YouTube's public oEmbed API).
+ *
+ * This gives the user visual confirmation that we picked up the right video
+ * BEFORE they click Summarize — avoiding wasted time on the wrong link.
+ */
+function VideoPreview({ videoId }: { videoId: string }) {
+  // Start in the "loading" state. Because the parent renders this component
+  // with `key={videoId}`, a new videoId causes React to remount this
+  // component fresh — so the initial state is always "loading" for each new
+  // video, without needing a synchronous setState inside useEffect.
+  const [state, setState] = useState<
+    | { kind: "loading" }
+    | { kind: "ok"; title: string; author: string; thumbnailUrl: string }
+    | { kind: "error"; message: string }
+  >({ kind: "loading" });
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function fetchMeta() {
+      try {
+        const res = await fetch(`/api/youtube-meta?videoId=${videoId}`);
+        const data = await res.json();
+        if (cancelled) return;
+        if (!res.ok || !data.ok) {
+          setState({
+            kind: "error",
+            message:
+              data?.error ?? "Couldn't fetch metadata for this video.",
+          });
+          return;
+        }
+        setState({
+          kind: "ok",
+          title: data.title,
+          author: data.author,
+          thumbnailUrl: data.thumbnailUrl,
+        });
+      } catch (e) {
+        if (cancelled) return;
+        setState({
+          kind: "error",
+          message: "Network error while fetching video metadata.",
+        });
+      }
+    }
+
+    fetchMeta();
+    return () => {
+      cancelled = true;
+    };
+  }, [videoId]);
+
+  if (state.kind === "loading") {
+    return (
+      <div className="flex items-center gap-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-900 px-3 py-2 text-xs text-zinc-500">
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        Fetching video info…
+      </div>
+    );
+  }
+
+  if (state.kind === "error") {
+    return (
+      <div className="flex items-center gap-2 rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30 px-3 py-2 text-[11px] text-amber-700 dark:text-amber-300">
+        <AlertCircle className="h-3.5 w-3.5 flex-shrink-0" />
+        {state.message} You can still proceed — we&apos;ll fetch the transcript
+        when you click Summarize.
+      </div>
+    );
+  }
+
+  return (
+    <a
+      href={`https://www.youtube.com/watch?v=${videoId}`}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="group flex gap-3 overflow-hidden rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 p-2 hover:border-zinc-300 dark:hover:border-zinc-600 transition-colors"
+    >
+      <div className="relative h-14 w-24 flex-shrink-0 overflow-hidden rounded bg-zinc-100 dark:bg-zinc-800">
+        <img
+          src={state.thumbnailUrl}
+          alt={state.title}
+          className="h-full w-full object-cover"
+          onError={(e) => {
+            (e.currentTarget as HTMLImageElement).style.display = "none";
+          }}
+        />
+        <div className="absolute inset-0 flex items-center justify-center bg-black/30 group-hover:bg-black/40 transition-colors">
+          <Youtube className="h-5 w-5 text-white" />
+        </div>
+      </div>
+      <div className="flex min-w-0 flex-1 flex-col justify-center">
+        <p className="line-clamp-2 text-xs font-semibold text-zinc-800 dark:text-zinc-100 leading-snug">
+          {state.title}
+        </p>
+        <p className="mt-0.5 truncate text-[11px] text-zinc-500 dark:text-zinc-400">
+          {state.author}
+        </p>
+      </div>
+    </a>
+  );
+}
 
 export type YouTubeMode = "summary" | "interview" | "ask";
 
@@ -59,6 +167,9 @@ interface YouTubeDialogProps {
   botBlockedHint?: string | null;
   /** Once the user dismisses the hint, the parent should clear it. */
   onClearHint?: () => void;
+  /** Optional pre-filled URL (e.g. when the user pasted a YouTube link in the
+   * main chat input and clicked the "Open YouTube dialog" chip). */
+  initialUrl?: string;
 }
 
 function extractVideoId(url: string): string | null {
@@ -83,6 +194,7 @@ export function YouTubeDialog({
   onSubmit,
   botBlockedHint,
   onClearHint,
+  initialUrl,
 }: YouTubeDialogProps) {
   const [url, setUrl] = useState("");
   const [startTime, setStartTime] = useState("");
@@ -92,6 +204,19 @@ export function YouTubeDialog({
   const [mode, setMode] = useState<YouTubeMode>("summary");
   const [fetchMode, setFetchMode] = useState<"auto" | "manual">("auto");
   const [transcript, setTranscript] = useState("");
+
+  // When `initialUrl` is set (e.g. user clicked "Open YouTube dialog →" from
+  // the URL detection chip in the main chat input), pre-fill the URL field
+  // when the dialog opens.
+  const [prevInitialUrl, setPrevInitialUrl] = useState<string | undefined>(
+    initialUrl
+  );
+  if (initialUrl !== prevInitialUrl) {
+    setPrevInitialUrl(initialUrl);
+    if (initialUrl && open) {
+      setUrl(initialUrl);
+    }
+  }
 
   // Interview-mode options
   const [difficulty, setDifficulty] =
@@ -308,9 +433,16 @@ export function YouTubeDialog({
               <p className="text-xs text-red-500">{urlError}</p>
             )}
             {videoId && (
-              <p className="text-xs text-emerald-600 dark:text-emerald-400">
-                ✓ Detected video ID: <code className="font-mono">{videoId}</code>
-              </p>
+              <>
+                <p className="text-xs text-emerald-600 dark:text-emerald-400">
+                  ✓ Detected video ID:{" "}
+                  <code className="font-mono">{videoId}</code>
+                </p>
+                {/* Live preview card with thumbnail + title + channel.
+                    The `key` prop forces a fresh mount whenever videoId changes,
+                    so the preview's "loading" state resets cleanly. */}
+                <VideoPreview key={videoId} videoId={videoId} />
+              </>
             )}
           </div>
 

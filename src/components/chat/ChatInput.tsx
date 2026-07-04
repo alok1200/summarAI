@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useEffect, useState } from "react";
+import { useRef, useEffect, useState, useMemo } from "react";
 import { ArrowUp, Square, Paperclip, Youtube, X, FileText, Image as ImageIcon } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
@@ -20,7 +20,7 @@ interface PendingAttachment {
 interface ChatInputProps {
   onSubmit: (text: string, attachments: Attachment[]) => void;
   onStop?: () => void;
-  onOpenYouTube?: () => void;
+  onOpenYouTube?: (prefilledUrl?: string) => void;
   isStreaming: boolean;
 }
 
@@ -33,6 +33,28 @@ export function ChatInput({
   const [value, setValue] = useState("");
   const [pending, setPending] = useState<PendingAttachment[]>([]);
   const [errors, setErrors] = useState<string[]>([]);
+  /** When the user pastes (or types) a YouTube URL, show a one-click "open in dialog" chip. */
+  const detectedYoutubeUrl = useMemo<string | null>(() => {
+    if (!value) return null;
+    const patterns: RegExp[] = [
+      /(?:youtube\.com\/watch\?v=)([A-Za-z0-9_-]{11})/,
+      /(?:youtu\.be\/)([A-Za-z0-9_-]{11})/,
+      /(?:youtube\.com\/embed\/)([A-Za-z0-9_-]{11})/,
+      /(?:youtube\.com\/shorts\/)([A-Za-z0-9_-]{11})/,
+      /(?:youtube\.com\/live\/)([A-Za-z0-9_-]{11})/,
+    ];
+    for (const p of patterns) {
+      const m = value.match(p);
+      if (m) {
+        const fullMatch = value.match(
+          /https?:\/\/[^\s]+?(?:youtube\.com\/watch\?v=[A-Za-z0-9_-]+|youtu\.be\/[A-Za-z0-9_-]+|youtube\.com\/(?:embed|shorts|live)\/[A-Za-z0-9_-]+)[^\s]*/
+        );
+        return fullMatch?.[0] ?? m[0];
+      }
+    }
+    return null;
+  }, [value]);
+
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -153,6 +175,40 @@ export function ChatInput({
           </div>
         )}
 
+        {/* Detected YouTube URL affordance — show a one-click "Summarize / Generate Q&A" chip */}
+        {detectedYoutubeUrl && (
+          <div className="mb-2 flex items-center gap-2 rounded-lg border border-red-200 dark:border-red-800 bg-red-50/70 dark:bg-red-950/30 px-3 py-1.5">
+            <Youtube className="h-3.5 w-3.5 text-red-600 dark:text-red-400 flex-shrink-0" />
+            <span className="flex-1 truncate text-xs text-zinc-700 dark:text-zinc-300">
+              YouTube link detected — summarize or generate interview Q&amp;A
+              from this video?
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                onOpenYouTube?.(detectedYoutubeUrl);
+                setValue("");
+              }}
+              disabled={isStreaming}
+              className="flex-shrink-0 rounded-md bg-red-600 hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed px-2 py-0.5 text-[11px] font-medium text-white transition-colors"
+            >
+              Open YouTube dialog →
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                // Strip the YouTube URL from the input so the chip disappears.
+                // The user can keep typing their question as a normal chat message.
+                setValue((v) => v.replace(detectedYoutubeUrl, "").trim());
+              }}
+              className="flex-shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-white/60 dark:hover:bg-zinc-800/60 transition-colors"
+              title="Dismiss — send as a normal message"
+            >
+              ✕
+            </button>
+          </div>
+        )}
+
         <div
           className={cn(
             "relative flex items-end gap-1 rounded-3xl border bg-white dark:bg-zinc-800 shadow-sm transition-colors",
@@ -183,7 +239,7 @@ export function ChatInput({
 
           {/* YouTube button */}
           <button
-            onClick={onOpenYouTube}
+            onClick={() => onOpenYouTube?.()}
             disabled={isStreaming}
             className="mb-2.5 flex h-9 w-9 items-center justify-center rounded-full text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-700 hover:text-red-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
             aria-label="Summarize YouTube video or generate interview Q&A"

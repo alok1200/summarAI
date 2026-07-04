@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { PanelLeftOpen, Sparkles, Loader2, Youtube } from "lucide-react";
 import {
   useChatStore,
@@ -44,6 +44,9 @@ export default function Home() {
   const [hasHydrated, setHasHydrated] = useState(false);
   const [youtubeOpen, setYoutubeOpen] = useState(false);
   const [youtubeBotHint, setYoutubeBotHint] = useState<string | null>(null);
+  /** Pre-filled URL for the YouTubeDialog — set when the user clicks the
+   * "Open YouTube dialog →" chip after pasting a YouTube link. */
+  const [youtubeInitialUrl, setYoutubeInitialUrl] = useState<string | undefined>(undefined);
   const scrollRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -86,6 +89,126 @@ export default function Home() {
   const activeConversation = conversations.find((c) => c.id === activeId);
   const messages = activeConversation?.messages ?? [];
   const videoContext = activeConversation?.videoContext;
+
+  /**
+   * Compute the "active" YouTube video ID for linkifying [MM:SS] timestamps
+   * in assistant messages. Preference order:
+   *   1. The conversation's videoContext (ask-about-video mode)
+   *   2. The most recent user message with a youtubeMeta (summary / interview mode)
+   */
+  const activeVideoId = useMemo<string | undefined>(() => {
+    if (videoContext?.videoId) return videoContext.videoId;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m.role === "user" && m.youtubeMeta?.videoId) {
+        return m.youtubeMeta.videoId;
+      }
+    }
+    return undefined;
+  }, [videoContext, messages]);
+
+  /**
+   * Regenerate the most recent assistant response: replace its content with
+   * a placeholder and re-run the conversation through the same endpoint that
+   * produced it the first time. We detect which endpoint by inspecting the
+   * last user message — if it has youtubeMeta, dispatch based on its content
+   * ("Generate N interview questions" → interview endpoint, "Summarize" →
+   * summary endpoint, otherwise → /api/chat).
+   */
+  const handleRegenerate = useCallback(async () => {
+    if (!activeConversation || isStreaming) return;
+    const msgs = activeConversation.messages;
+    if (msgs.length < 2) return;
+
+    // Find the last assistant message and the user message right before it.
+    let lastAssistantIdx = -1;
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if (msgs[i].role === "assistant") {
+        lastAssistantIdx = i;
+        break;
+      }
+    }
+    if (lastAssistantIdx <= 0) return;
+    const lastUserMsg = msgs[lastAssistantIdx - 1];
+    if (lastUserMsg.role !== "user") return;
+
+    // Reset the assistant message content to a placeholder.
+    const assistantMsgId = msgs[lastAssistantIdx].id;
+    updateMessage(activeConversation.id, assistantMsgId, "⏳ Regenerating…");
+    setStreaming(true);
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    try {
+      // Reconstruct the request — for /api/chat we send the full message
+      // history up to (and including) the user message. For YouTube summary /
+      // interview endpoints we don't have the original payload anymore, so we
+      // just re-run /api/chat with the user's text content as the prompt.
+      const priorMessages = msgs
+        .slice(0, lastAssistantIdx + 1)
+        .filter((m) => m.content.trim() !== "")
+        .map((m) => ({
+          role: m.role,
+          content: m.content,
+          attachments: m.attachments,
+        }));
+
+      const payload: Record<string, unknown> = { messages: priorMessages };
+      if (videoContext) {
+        payload.videoContext = {
+          url: videoContext.url,
+          videoId: videoContext.videoId,
+          title: videoContext.title,
+          author: videoContext.author,
+          transcript: videoContext.transcript,
+          chunks: videoContext.chunks,
+          topicIndex: videoContext.topicIndex,
+        };
+      }
+
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+      if (!res.ok || !res.body) {
+        const errBody = await res.json().catch(() => ({}));
+        throw new Error(errBody?.error || `Request failed: ${res.status}`);
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let acc = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        acc += decoder.decode(value, { stream: true });
+        updateMessage(activeConversation.id, assistantMsgId, acc);
+      }
+      if (!acc.trim()) {
+        updateMessage(
+          activeConversation.id,
+          assistantMsgId,
+          "_(No response received.)_"
+        );
+      }
+    } catch (err: unknown) {
+      if ((err as Error)?.name === "AbortError") {
+        // keep partial
+      } else {
+        const message =
+          err instanceof Error ? err.message : "Something went wrong.";
+        updateMessage(
+          activeConversation.id,
+          assistantMsgId,
+          `⚠️ **Error:** ${message}`
+        );
+      }
+    } finally {
+      setStreaming(false);
+      abortRef.current = null;
+    }
+  }, [activeConversation, isStreaming, setStreaming, updateMessage, videoContext]);
 
   /**
    * Core streaming helper: appends a user message + empty assistant message,
@@ -624,20 +747,39 @@ export default function Home() {
             <EmptyState onPickPrompt={(p) => sendMessage(p, [])} />
           ) : (
             <div className="pb-4">
-              {messages.map((m, idx) => (
-                <MessageBubble
-                  key={m.id}
-                  role={m.role}
-                  content={m.content}
-                  attachments={m.attachments}
-                  youtubeMeta={m.youtubeMeta}
-                  isStreaming={
-                    isStreaming &&
-                    idx === messages.length - 1 &&
-                    m.role === "assistant"
-                  }
-                />
-              ))}
+              {messages.map((m, idx) => {
+                // The latest "completed" assistant response is eligible for
+                // the Regenerate button. We consider it regeneratable if:
+                //   - it's an assistant message
+                //   - we're not currently streaming
+                //   - it's the last message, OR it's second-to-last and the
+                //     last message is a user message (waiting for response)
+                const isRegeneratable =
+                  m.role === "assistant" &&
+                  !isStreaming &&
+                  (idx === messages.length - 1 ||
+                    (idx === messages.length - 2 &&
+                      messages[messages.length - 1].role === "user"));
+                return (
+                  <MessageBubble
+                    key={m.id}
+                    role={m.role}
+                    content={m.content}
+                    attachments={m.attachments}
+                    youtubeMeta={m.youtubeMeta}
+                    videoId={activeVideoId}
+                    isStreaming={
+                      isStreaming &&
+                      idx === messages.length - 1 &&
+                      m.role === "assistant"
+                    }
+                    isLatestAssistant={isRegeneratable}
+                    onRegenerate={
+                      isRegeneratable ? handleRegenerate : undefined
+                    }
+                  />
+                );
+              })}
             </div>
           )}
         </div>
@@ -645,17 +787,24 @@ export default function Home() {
         <ChatInput
           onSubmit={sendMessage}
           onStop={handleStop}
-          onOpenYouTube={() => setYoutubeOpen(true)}
+          onOpenYouTube={(prefilledUrl) => {
+            setYoutubeInitialUrl(prefilledUrl);
+            setYoutubeOpen(true);
+          }}
           isStreaming={isStreaming}
         />
       </div>
 
       <YouTubeDialog
         open={youtubeOpen}
-        onOpenChange={setYoutubeOpen}
+        onOpenChange={(open) => {
+          setYoutubeOpen(open);
+          if (!open) setYoutubeInitialUrl(undefined);
+        }}
         onSubmit={handleYouTube}
         botBlockedHint={youtubeBotHint}
         onClearHint={() => setYoutubeBotHint(null)}
+        initialUrl={youtubeInitialUrl}
       />
     </div>
   );

@@ -248,3 +248,31 @@ Stage Summary:
 - New files: /src/app/api/youtube-meta/route.ts
 - Modified files: /src/components/chat/MessageBubble.tsx, /src/components/chat/YouTubeDialog.tsx, /src/components/chat/ChatInput.tsx, /src/components/chat/Sidebar.tsx, /src/app/page.tsx
 - Dev server is running on port 3000, ready for the user to test.
+
+---
+Task ID: env-byo-keys
+Agent: main
+Task: Make every API key in .env behave as "fill it in → use your key; leave it empty → fall back to the default and keep running", so the app runs identically to today when no keys are provided.
+
+Work Log:
+- Audited every `process.env.*` reference in the codebase (auth.ts, db.ts, llm.ts, youtube-transcript.ts).
+- Discovered that ZAI_API_KEY was documented in .env / .env.example but never actually read by the app — the Z.ai SDK only loads from .z-ai-config files (/etc/.z-ai-config is the pre-installed default).
+- Discovered that LLM_MODEL was declared but never passed to the SDK, and LLM_VISION_MODEL was declared but the vision functions hardcoded "glm-4v-flash".
+- Confirmed YOUTUBE_API_KEY and SESSION_SECRET were already correctly wired with sensible fallbacks.
+- Rewrote src/lib/llm.ts:
+    * getZai() now reads process.env.ZAI_API_KEY first. If set, it constructs the ZAI client directly with {baseUrl, apiKey} (bypassing the SDK's `private constructor` TS hint via a cast). If empty, it falls back to ZAI.create() which loads /etc/.z-ai-config — preserving today's "out of the box" behaviour.
+    * Added ZAI_BASE_URL env var (optional, defaults to https://api.z.ai/v1) for users who need to point at a different endpoint.
+    * Added getLLMModel() and getLLMVisionModel() helpers that read process.env.LLM_MODEL / LLM_VISION_MODEL with the right defaults (undefined / "glm-4v-flash").
+    * Threaded model name through chatComplete, chatCompleteStream, visionComplete, visionCompleteStream so user-set models actually take effect.
+- Rewrote .env and .env.example with a clear "BYO keys vs default fallback" contract at the top, including a table showing what happens when each key is left empty.
+- Wrote scripts/verify-env-keys.mjs — confirms both paths end-to-end:
+    * Path A (empty ZAI_API_KEY): client loads from /etc/.z-ai-config, a real chat call returns "PONG".
+    * Path B (ZAI_API_KEY set): client.config.apiKey and baseUrl come from our env, NOT from /etc/.z-ai-config.
+    * Path C (ZAI_API_KEY set, ZAI_BASE_URL empty): baseUrl defaults to https://api.z.ai/v1.
+    * LLM_MODEL / LLM_VISION_MODEL helpers handle defaults, whitespace-only, and real overrides correctly.
+- All 15 verification checks pass. `npx tsc --noEmit` passes.
+
+Stage Summary:
+- Files changed: src/lib/llm.ts, .env, .env.example
+- Files added: scripts/verify-env-keys.mjs
+- Contract now enforced app-wide: empty env value → use the default the app already had; non-empty env value → override the default with your key. Verified with a real round-trip chat call on the default path.

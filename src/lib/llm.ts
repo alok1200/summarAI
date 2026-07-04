@@ -116,11 +116,61 @@ export async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 /**
- * Create a ZAI client. We re-create per request because the SDK client is
- * lightweight and this avoids any accidental cross-request state.
+ * Resolve ZAI client configuration.
+ *
+ * BYO-key behaviour:
+ *   - If ZAI_API_KEY is set in the environment, we use it (plus optional
+ *     ZAI_BASE_URL). This lets the user plug in their own Z.ai account when
+ *     deploying elsewhere (Vercel / their own server / another cloud).
+ *   - If ZAI_API_KEY is empty or unset, we fall back to ZAI.create() which
+ *     reads the SDK's default .z-ai-config file (shipped with this env at
+ *     /etc/.z-ai-config). That is what makes the app run "out of the box"
+ *     with zero configuration.
+ *
+ * The SDK's constructor is marked `private` in the .d.ts (it wants you to go
+ * through ZAI.create()), but the runtime JS doesn't enforce that — so we
+ * cast to any to instantiate directly with our env-provided config.
  */
-export async function getZai() {
+interface ZaiConfig {
+  baseUrl: string;
+  apiKey: string;
+  chatId?: string;
+  userId?: string;
+  token?: string;
+}
+
+const DEFAULT_ZAI_BASE_URL = "https://api.z.ai/v1";
+
+export async function getZai(): Promise<ZAI> {
+  const envKey = process.env.ZAI_API_KEY;
+  if (envKey && envKey.trim() !== "") {
+    const config: ZaiConfig = {
+      baseUrl: (process.env.ZAI_BASE_URL || DEFAULT_ZAI_BASE_URL).trim(),
+      apiKey: envKey.trim(),
+    };
+    // Bypass the `private constructor` TS hint — runtime allows it.
+    return new (ZAI as unknown as new (c: ZaiConfig) => ZAI)(config);
+  }
+  // Fallback: default /etc/.z-ai-config (the pre-configured env key).
   return await ZAI.create();
+}
+
+/**
+ * Resolve the chat model name. If LLM_MODEL is set in the environment, use it;
+ * otherwise return undefined so the SDK picks its default production model.
+ */
+export function getLLMModel(): string | undefined {
+  const m = process.env.LLM_MODEL;
+  return m && m.trim() !== "" ? m.trim() : undefined;
+}
+
+/**
+ * Resolve the vision model name. Defaults to "glm-4v-flash" if LLM_VISION_MODEL
+ * is unset/empty (matches the previous hardcoded behaviour).
+ */
+export function getLLMVisionModel(): string {
+  const m = process.env.LLM_VISION_MODEL;
+  return m && m.trim() !== "" ? m.trim() : "glm-4v-flash";
 }
 
 /**
@@ -141,6 +191,8 @@ export async function chatComplete(
     messages,
     thinking: { type: "disabled" },
   };
+  const model = getLLMModel();
+  if (model) params.model = model;
   if (options?.maxTokens) {
     params.max_tokens = options.maxTokens;
   }
@@ -159,7 +211,7 @@ export async function chatComplete(
  */
 export async function visionComplete(
   messages: VisionMessage[],
-  model = "glm-4v-flash"
+  model: string = getLLMVisionModel()
 ): Promise<string> {
   const zai = await getZai();
   const completion = await withRetry(() =>
@@ -247,6 +299,8 @@ export async function chatCompleteStream(
     stream: true,
     thinking: { type: "disabled" },
   };
+  const model = getLLMModel();
+  if (model) params.model = model;
   if (options?.maxTokens) {
     params.max_tokens = options.maxTokens;
   }
@@ -291,7 +345,7 @@ export async function chatCompleteStream(
  */
 export async function visionCompleteStream(
   messages: VisionMessage[],
-  model = "glm-4v-flash"
+  model: string = getLLMVisionModel()
 ): Promise<ReadableStream<Uint8Array>> {
   const zai = await getZai();
   const stream = await withRetry(() =>

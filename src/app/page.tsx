@@ -253,7 +253,12 @@ export default function Home() {
           videoId: videoCtx.videoId,
           title: videoCtx.title,
           author: videoCtx.author,
+          // For short videos: pass transcript directly.
+          // For long videos: pass chunks + topicIndex instead (chat route
+          // does retrieval to pick the most relevant chunks per question).
           transcript: videoCtx.transcript,
+          chunks: videoCtx.chunks,
+          topicIndex: videoCtx.topicIndex,
         };
       }
 
@@ -376,7 +381,9 @@ export default function Home() {
             author: string;
             url: string;
             videoId: string;
-            transcript: string;
+            transcript: string | null;
+            chunks: any[] | null;
+            topicIndex: string | null;
             segmentCount: number;
             startTime: number;
             endTime: number;
@@ -384,14 +391,17 @@ export default function Home() {
             isManual: boolean;
           };
 
-          // Store the transcript as the conversation's video context so
-          // subsequent chat messages get it injected automatically.
+          // Store the transcript (or chunks + topicIndex for long videos) as
+          // the conversation's video context so subsequent chat messages get
+          // it injected automatically.
           const ctx: VideoContext = {
             url: data.url,
             videoId: data.videoId,
             title: data.title,
             author: data.author,
-            transcript: data.transcript,
+            transcript: data.transcript ?? undefined,
+            chunks: data.chunks ?? undefined,
+            topicIndex: data.topicIndex ?? undefined,
             loadedAt: Date.now(),
           };
           setVideoContext(convoId, ctx);
@@ -400,15 +410,20 @@ export default function Home() {
           const mins = Math.round(
             (data.endTime - data.startTime) / 60
           );
+          const isLong = !!(data.chunks && data.chunks.length > 0);
+          const transcriptDesc = isLong
+            ? `${data.segmentCount} segments · ~${mins} min · split into ${data.chunks!.length} chunks for fast retrieval`
+            : `${data.segmentCount} segments${mins > 0 ? ` · ~${mins} min` : ""}`;
           const welcomeContent =
             `✅ **Video loaded — ask me anything about it!**\n\n` +
             `**Title:** ${data.title}\n` +
             `**Channel:** ${data.author}\n` +
             `**URL:** ${data.url}\n` +
-            `**Transcript:** ${data.segmentCount} segments${
-              mins > 0 ? ` · ~${mins} min` : ""
-            }${data.isManual ? " (manual paste)" : ""}\n` +
+            `**Transcript:** ${transcriptDesc}${data.isManual ? " (manual paste)" : ""}\n` +
             (data.rangeNote ? `**Note:** ${data.rangeNote}\n` : "") +
+            (isLong
+              ? `**Long video mode:** I built a topic index in parallel and will retrieve the most relevant chunks for each question — so even a 50-hour video can be queried accurately and fast.\n`
+              : "") +
             `\n---\n\n` +
             `I'll answer your questions **only** based on what's in this video's transcript. ` +
             `If you ask about something that isn't covered in the video, I'll let you know.\n\n` +

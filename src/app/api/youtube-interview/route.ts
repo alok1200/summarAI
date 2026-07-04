@@ -9,7 +9,18 @@ import {
   fetchTranscriptWithRetry,
   parseUserTranscript,
 } from "@/lib/youtube-transcript";
-import { chatCompleteStream, streamHeaderAndLLM } from "@/lib/llm";
+import {
+  chatComplete,
+  chatCompleteStream,
+  streamHeaderAndLLM,
+  type ChatMessage,
+} from "@/lib/llm";
+import {
+  chunkTranscript,
+  mapChunks,
+  shouldUseMapReduce,
+  type TranscriptChunk,
+} from "@/lib/youtube-chunks";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -100,6 +111,114 @@ function buildSystemPrompt(
     `questions and note any limitations at the top.\n` +
     `5. Vary the question style (definition, application, comparison, scenario, debugging).\n`
   );
+}
+
+/**
+ * MAP step for long videos: extract question-worthy TOPICS from one chunk.
+ * We don't generate the actual Q&A here — that would duplicate effort and
+ * produce questions clustered around the chunk's local content. Instead we
+ * extract a structured list of topics with timestamps, which the reduce step
+ * uses to pick a balanced, diverse set of questions spanning the whole video.
+ */
+async function extractTopicsFromChunk(
+  chunk: TranscriptChunk,
+  ctx: {
+    url: string;
+    videoTitle: string | undefined;
+    difficulty: Difficulty;
+    interviewType: InterviewType;
+    targetRole: string | undefined;
+  }
+): Promise<string> {
+  const systemPrompt =
+    `You are an interview coach analyzing ONE segment of a long YouTube video. ` +
+    `Your job: extract a structured list of question-worthy TOPICS from this segment. ` +
+    `These topics will be merged with topics from other segments and used to generate ` +
+    `the final interview questions, so be specific and cite timestamps.\n\n` +
+    `For each topic, output a Markdown bullet in this exact format:\n` +
+    `- [MM:SS] **Topic name** — one-sentence description of what's covered and what kind of ` +
+    `${ctx.interviewType} question could be asked about it at ${ctx.difficulty} difficulty.\n\n` +
+    `Aim for 5-12 topics per segment. Pick the most question-worthy concepts, definitions, ` +
+    `comparisons, decisions, and concrete examples mentioned in this segment. ` +
+    `Do NOT generate the actual questions — just identify topics. Do NOT invent topics ` +
+    `that aren't in the transcript.`;
+
+  const userMessage =
+    `Extract question-worthy topics from this segment of a YouTube video.\n\n` +
+    `Video URL: ${ctx.url}\n` +
+    (ctx.videoTitle ? `Video title: ${ctx.videoTitle}\n` : "") +
+    `Segment: ${chunk.startTimeLabel} – ${chunk.endTimeLabel} ` +
+    `(chunk ${chunk.index}/${chunk.total}, ${chunk.segmentCount} segments)\n` +
+    `Target difficulty: ${ctx.difficulty}\n` +
+    `Interview type: ${ctx.interviewType}\n` +
+    (ctx.targetRole ? `Target role: ${ctx.targetRole}\n` : "") +
+    `\nTranscript segment:\n\n${chunk.text}\n\n` +
+    `List the topics now (Markdown bullets, each starting with a [MM:SS] timestamp).`;
+
+  return await chatComplete([
+    { role: "system", content: systemPrompt },
+    { role: "user", content: userMessage },
+  ]);
+}
+
+/**
+ * REDUCE step for long videos: given the merged topic list from all chunks
+ * + the per-chunk transcript texts (for citation), generate the final N
+ * interview questions and answers. Streams the final result.
+ */
+function buildReduceMessages(
+  chunks: TranscriptChunk[],
+  topicLists: string[],
+  ctx: {
+    url: string;
+    videoTitle: string | undefined;
+    videoChannel: string | undefined;
+    difficulty: Difficulty;
+    interviewType: InterviewType;
+    questionCount: number;
+    targetRole: string | undefined;
+    instructions: string | undefined;
+    actualStartTime: number;
+    actualEndTime: number;
+    totalSegments: number;
+  }
+): ChatMessage[] {
+  const systemPrompt = buildSystemPrompt(
+    ctx.difficulty,
+    ctx.interviewType,
+    ctx.questionCount,
+    ctx.targetRole
+  );
+
+  const mergedTopics = topicLists
+    .map((topics, i) => {
+      const c = chunks[i];
+      return `### Topics from segment ${c.index}/${c.total} (${c.startTimeLabel} – ${c.endTimeLabel})\n\n${topics}`;
+    })
+    .join("\n\n---\n\n");
+
+  const userMessage =
+    `Generate exactly ${ctx.questionCount} ${ctx.interviewType} interview questions and answers ` +
+    `at ${ctx.difficulty} difficulty for this YouTube video.\n\n` +
+    `Video URL: ${ctx.url}\n` +
+    (ctx.videoTitle ? `Video title: ${ctx.videoTitle}\n` : "") +
+    (ctx.videoChannel ? `Video channel: ${ctx.videoChannel}\n` : "") +
+    `Total time range: ${formatTime(ctx.actualStartTime)} – ${formatTime(ctx.actualEndTime)} ` +
+    `(${ctx.totalSegments} segments across ${chunks.length} chunks)\n\n` +
+    (ctx.instructions ? `Additional instructions: ${ctx.instructions}\n\n` : "") +
+    `Below are question-worthy TOPICS extracted from each segment of the video (with timestamps). ` +
+    `Use these topics as your source of truth for what the video covers. Pick a DIVERSE, balanced ` +
+    `set of ${ctx.questionCount} questions spanning different segments of the video — do not cluster ` +
+    `all questions around one segment. Each answer should reference the relevant [MM:SS] timestamp ` +
+    `from the topic list.\n\n` +
+    `--- TOPIC LIST (per segment) ---\n\n${mergedTopics}\n\n` +
+    `--- END TOPIC LIST ---\n\n` +
+    `Now generate the ${ctx.questionCount} questions and answers following the format from the system prompt.`;
+
+  return [
+    { role: "system", content: systemPrompt },
+    { role: "user", content: userMessage },
+  ];
 }
 
 export async function POST(req: NextRequest) {
@@ -200,56 +319,7 @@ export async function POST(req: NextRequest) {
     const lastSeg = filtered[filtered.length - 1];
     const actualEndTime = lastSeg.start + lastSeg.dur;
 
-    const transcriptText = filtered
-      .map((s) => `[${formatTime(s.start)}] ${s.text}`)
-      .join("\n");
-
-    const MAX_CHARS = 80000;
-    const truncated =
-      transcriptText.length > MAX_CHARS
-        ? transcriptText.slice(0, MAX_CHARS) +
-          "\n\n[... transcript truncated due to length ...]"
-        : transcriptText;
-
     const videoMeta: VideoMeta | null = await fetchVideoMeta(videoId);
-
-    const systemPrompt = buildSystemPrompt(
-      difficulty,
-      interviewType,
-      questionCount,
-      targetRole
-    );
-
-    const userMessage =
-      `Generate ${questionCount} ${interviewType} interview questions and answers ` +
-      `at ${difficulty} difficulty based on the following YouTube video transcript.\n\n` +
-      `Video URL: ${url}\n` +
-      (videoMeta
-        ? `Video title: ${videoMeta.title}\nVideo channel: ${videoMeta.author}\n`
-        : "") +
-      `Selected time range: ${formatTime(actualStartTime)} – ${formatTime(
-        actualEndTime
-      )}  (about ${Math.round(actualEndTime - actualStartTime)}s, ${
-        filtered.length
-      } segments)\n\n` +
-      (instructions
-        ? `Additional instructions from the user: ${instructions}\n\n`
-        : "") +
-      `Transcript (with timestamps):\n\n${truncated}\n\n` +
-      `Please generate the ${questionCount} questions and answers now, following the format from the system prompt.`;
-
-    console.log(
-      `[youtube-interview] Generating ${questionCount} ${difficulty} ${interviewType} questions for ${videoId}`
-    );
-
-    // REAL STREAMING: pipe the LLM's streaming response directly so the
-    // first token reaches the browser in ~1 second. This prevents the
-    // preview proxy from returning 502 on long generations (15-question
-    // interview Q&A can take 60+ seconds non-streaming).
-    const llmStream = await chatCompleteStream([
-      { role: "system", content: systemPrompt },
-      { role: "user", content: userMessage },
-    ]);
 
     const sourceLabel = isManual ? " (manual paste)" : "";
     const header =
@@ -267,7 +337,129 @@ export async function POST(req: NextRequest) {
       (instructions ? `**Your instructions:** ${instructions}\n` : "") +
       `\n---\n\n`;
 
-    return streamHeaderAndLLM(header, llmStream);
+    // Decide whether to use map-reduce (long videos) or a single LLM call.
+    const useMapReduce = shouldUseMapReduce(filtered);
+
+    if (!useMapReduce) {
+      // ---------- Short video: single LLM call with real streaming ----------
+      const transcriptText = filtered
+        .map((s) => `[${formatTime(s.start)}] ${s.text}`)
+        .join("\n");
+
+      const systemPrompt = buildSystemPrompt(
+        difficulty,
+        interviewType,
+        questionCount,
+        targetRole
+      );
+
+      const userMessage =
+        `Generate ${questionCount} ${interviewType} interview questions and answers ` +
+        `at ${difficulty} difficulty based on the following YouTube video transcript.\n\n` +
+        `Video URL: ${url}\n` +
+        (videoMeta
+          ? `Video title: ${videoMeta.title}\nVideo channel: ${videoMeta.author}\n`
+          : "") +
+        `Selected time range: ${formatTime(actualStartTime)} – ${formatTime(
+          actualEndTime
+        )}  (about ${Math.round(actualEndTime - actualStartTime)}s, ${
+          filtered.length
+        } segments)\n\n` +
+        (instructions
+          ? `Additional instructions from the user: ${instructions}\n\n`
+          : "") +
+        `Transcript (with timestamps):\n\n${transcriptText}\n\n` +
+        `Please generate the ${questionCount} questions and answers now, following the format from the system prompt.`;
+
+      console.log(
+        `[youtube-interview] Generating ${questionCount} ${difficulty} ${interviewType} questions for ${videoId} (single-call)`
+      );
+
+      const llmStream = await chatCompleteStream([
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userMessage },
+      ]);
+      return streamHeaderAndLLM(header, llmStream);
+    }
+
+    // ---------- Long video: MAP-REDUCE with parallel topic extraction ----------
+    const chunks = chunkTranscript(filtered);
+    console.log(
+      `[youtube-interview] MAP-REDUCE: ${filtered.length} segments → ${chunks.length} chunks (parallel) for ${videoId}`
+    );
+
+    const mapCtx = {
+      url,
+      videoTitle: videoMeta?.title,
+      difficulty,
+      interviewType,
+      targetRole,
+    };
+    const reduceCtx = {
+      url,
+      videoTitle: videoMeta?.title,
+      videoChannel: videoMeta?.author,
+      difficulty,
+      interviewType,
+      questionCount,
+      targetRole,
+      instructions: instructions || undefined,
+      actualStartTime,
+      actualEndTime,
+      totalSegments: filtered.length,
+    };
+
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        const emit = (text: string) => {
+          controller.enqueue(encoder.encode(text));
+        };
+
+        // Phase 1: header + map-reduce notice
+        emit(header);
+        emit(
+          `⏳ **Processing ${chunks.length} chunks in parallel** ` +
+            `(extracting topics from each ~5-10 min segment, then generating ` +
+            `${questionCount} balanced questions spanning the whole video).\n\n`
+        );
+
+        // Phase 2: parallel map step (extract topics from each chunk)
+        const topicLists = await mapChunks(
+          chunks,
+          (chunk) => extractTopicsFromChunk(chunk, mapCtx),
+          (done, total) => {
+            emit(`✅ Chunk ${done}/${total} analyzed\n`);
+          }
+        );
+
+        emit(`\n🎯 **Generating ${questionCount} questions from ${chunks.length * 5}+ topics…**\n\n---\n\n`);
+
+        // Phase 3: reduce step — stream the final Q&A
+        const reduceMessages = buildReduceMessages(chunks, topicLists, reduceCtx);
+        const finalStream = await chatCompleteStream(reduceMessages);
+        const reader = finalStream.getReader();
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            controller.enqueue(value);
+          }
+        } finally {
+          reader.releaseLock();
+        }
+
+        controller.close();
+      },
+    });
+
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Cache-Control": "no-cache, no-transform",
+        Connection: "keep-alive",
+      },
+    });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Unknown error";
     const code = (err as any)?.code;

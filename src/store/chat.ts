@@ -26,19 +26,47 @@ export interface YouTubeMeta {
 }
 
 /**
+ * One chunk of a long video's transcript. Used for retrieval-augmented Q&A:
+ * when the user asks a question, the chat endpoint searches the topic index
+ * to find the most relevant chunks, then injects only those (not the whole
+ * 50-hour transcript) into the LLM context.
+ */
+export interface VideoChunk {
+  index: number;
+  total: number;
+  startTime: number;
+  endTime: number;
+  startTimeLabel: string;
+  endTimeLabel: string;
+  segmentCount: number;
+  text: string;
+}
+
+/**
  * When a conversation has `videoContext` set, the chat endpoint will inject
  * the video transcript as system context and use a strict prompt that tells
  * the assistant to ONLY answer questions based on the transcript. If the user
  * asks about something not in the video, the assistant responds with the
  * `offTopicMessage` below.
+ *
+ * Two modes:
+ *   - Short video: `transcript` is set, `chunks` is null. The whole transcript
+ *     is injected as system context.
+ *   - Long video: `transcript` is null/empty, `chunks` + `topicIndex` are
+ *     set. The chat endpoint does retrieval — finds the most relevant chunks
+ *     for each question and injects only those.
  */
 export interface VideoContext {
   url: string;
   videoId: string;
   title: string;
   author: string;
-  /** Pre-formatted transcript text, ready to inject into the system prompt. */
-  transcript: string;
+  /** Pre-formatted transcript text — set for short videos, null/empty for long. */
+  transcript?: string;
+  /** Topic index for retrieval — set for long videos only. */
+  topicIndex?: string;
+  /** Chunked transcript — set for long videos only. */
+  chunks?: VideoChunk[];
   /** When the video was loaded — for display purposes. */
   loadedAt: number;
 }

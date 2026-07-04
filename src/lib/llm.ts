@@ -40,14 +40,13 @@ const RETRY_CONFIG = {
 /**
  * Classify an error as "transient" — i.e., one that's worth retrying.
  * We retry on:
+ *   - HTTP 429 (rate limit — with backoff, the gateway recovers)
  *   - HTTP 502/503/504/520/521/522/524 (gateway/upstream errors)
  *   - Network errors (fetch failed, ECONNRESET, ETIMEDOUT, socket hang up)
  *   - AbortError (timeout)
  *
  * We do NOT retry on:
  *   - HTTP 400/401/403/422 (client errors — retrying won't help)
- *   - HTTP 429 (rate limit — the SDK should back off, and we don't want to
- *     make it worse by hammering the gateway)
  */
 function isTransientError(err: unknown): boolean {
   if (!err) return false;
@@ -55,6 +54,7 @@ function isTransientError(err: unknown): boolean {
   const status = (err as any)?.status ?? (err as any)?.statusCode;
   if (typeof status === "number") {
     return (
+      status === 429 ||
       status === 502 ||
       status === 503 ||
       status === 504 ||
@@ -65,6 +65,9 @@ function isTransientError(err: unknown): boolean {
     );
   }
   return (
+    msg.includes("429") ||
+    msg.includes("too many requests") ||
+    msg.includes("rate limit") ||
     msg.includes("502") ||
     msg.includes("503") ||
     msg.includes("504") ||

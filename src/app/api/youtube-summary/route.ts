@@ -9,6 +9,7 @@ import {
   fetchTranscriptWithRetry,
   parseUserTranscript,
   TIMESTAMP_RULES,
+  buildLanguageInstruction,
 } from "@/lib/youtube-transcript";
 import {
   chatComplete,
@@ -42,7 +43,7 @@ function jsonResponse(status: number, body: unknown) {
  */
 async function summarizeChunk(
   chunk: TranscriptChunk,
-  ctx: { url: string; videoTitle: string | undefined; videoChannel: string | undefined; instructions: string | undefined }
+  ctx: { url: string; videoTitle: string | undefined; videoChannel: string | undefined; instructions: string | undefined; language?: string }
 ): Promise<string> {
   const systemPrompt =
     `You are an expert AI assistant that produces COMPREHENSIVE, DETAILED summaries of ONE segment of a longer YouTube video transcript. ` +
@@ -62,7 +63,8 @@ async function summarizeChunk(
     TIMESTAMP_RULES + `\n\n` +
     `Use Markdown. Do not invent information that isn't in the transcript. ` +
     `Be EXHAUSTIVE — it is better to over-include than to miss a small topic. ` +
-    `Aim for 800-1500 words for a typical 5-10 minute segment.`;
+    `Aim for 800-1500 words for a typical 5-10 minute segment.` +
+    buildLanguageInstruction(ctx.language);
 
   const userMessage =
     `Produce a COMPREHENSIVE summary of this segment of a YouTube video transcript. ` +
@@ -96,7 +98,7 @@ async function summarizeChunk(
 async function summarizeSection(
   group: TranscriptChunk[],
   chunkSummariesForGroup: string[],
-  ctx: { url: string; videoTitle: string | undefined; videoChannel: string | undefined; instructions: string | undefined }
+  ctx: { url: string; videoTitle: string | undefined; videoChannel: string | undefined; instructions: string | undefined; language?: string }
 ): Promise<string> {
   const label = groupLabel(group);
   const segmentCount = group.reduce((n, c) => n + c.segmentCount, 0);
@@ -119,7 +121,8 @@ async function summarizeSection(
     `Cover EVERY small topic — even brief mentions deserve their own entry. ` +
     `Aim for 1500-3000 words for the section. Be exhaustive.\n\n` +
     TIMESTAMP_RULES + `\n\n` +
-    `Use Markdown. Do not invent information not present in the per-chunk summaries.`;
+    `Use Markdown. Do not invent information not present in the per-chunk summaries.` +
+    buildLanguageInstruction(ctx.language);
 
   const chunksDescription = chunkSummariesForGroup
     .map((s, i) => {
@@ -164,6 +167,7 @@ function buildReduceMessages(
     videoTitle: string | undefined;
     videoChannel: string | undefined;
     instructions: string | undefined;
+    language?: string;
     actualStartTime: number;
     actualEndTime: number;
     totalSegments: number;
@@ -208,7 +212,8 @@ function buildReduceMessages(
     `- Do NOT invent information not present in the ${inputWord} summaries.\n` +
     `- Do NOT be concise at the cost of completeness — exhaustiveness is the priority.\n` +
     `- When the same topic appears in multiple ${inputWord}s, MERGE the details under one heading (don't repeat).\n` +
-    `- Use Markdown headings, bold, lists, and code blocks for clarity.`;
+    `- Use Markdown headings, bold, lists, and code blocks for clarity.` +
+    buildLanguageInstruction(ctx.language);
 
   const segmentsDescription = inputSummaries
     .map((s, i) => `### ${inputLabels[i]}\n\n${s}`)
@@ -243,6 +248,7 @@ export async function POST(req: NextRequest) {
     const endTimeStr: string = body.endTime ?? "";
     const instructions: string = (body.instructions ?? "").trim();
     const manualTranscript: string = (body.transcript ?? "").trim();
+    const language: string = (body.language ?? "").trim();
 
     parsedVideoId = extractVideoId(url);
     if (!parsedVideoId) {
@@ -329,6 +335,7 @@ export async function POST(req: NextRequest) {
       videoTitle: videoMeta?.title,
       videoChannel: videoMeta?.author,
       instructions: instructions || undefined,
+      language: language || undefined,
       actualStartTime,
       actualEndTime,
       totalSegments: filtered.length,
@@ -346,6 +353,7 @@ export async function POST(req: NextRequest) {
       )}  ·  ${filtered.length} transcript segments\n` +
       (rangeNote ? `**Note:** ${rangeNote}\n` : "") +
       (instructions ? `**Your instructions:** ${instructions}\n` : "") +
+      (language ? `**Response language:** ${language}\n` : "") +
       `\n---\n\n`;
 
     // Decide whether to use map-reduce (long videos) or a single LLM call.
@@ -384,7 +392,8 @@ export async function POST(req: NextRequest) {
         "STRICT RULES:\n" +
         "- Do NOT invent information that isn't in the transcript.\n" +
         "- Do NOT be concise at the cost of completeness — exhaustiveness is the priority.\n" +
-        "- Use Markdown headings, bold, lists, and code blocks for clarity.";
+        "- Use Markdown headings, bold, lists, and code blocks for clarity." +
+        buildLanguageInstruction(language);
 
       const userMessage =
         `Please produce a COMPREHENSIVE summary of the following YouTube video transcript. ` +
@@ -528,6 +537,7 @@ export async function POST(req: NextRequest) {
           videoTitle: ctx.videoTitle,
           videoChannel: ctx.videoChannel,
           instructions: ctx.instructions,
+          language: ctx.language,
           actualStartTime: ctx.actualStartTime,
           actualEndTime: ctx.actualEndTime,
           totalSegments: ctx.totalSegments,

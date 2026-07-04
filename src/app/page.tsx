@@ -163,6 +163,7 @@ export default function Home() {
           transcript: videoContext.transcript,
           chunks: videoContext.chunks,
           topicIndex: videoContext.topicIndex,
+          language: videoContext.language,
         };
       }
 
@@ -382,6 +383,9 @@ export default function Home() {
           transcript: videoCtx.transcript,
           chunks: videoCtx.chunks,
           topicIndex: videoCtx.topicIndex,
+          // Persist the user's chosen language so every follow-up Q&A in
+          // ask-about-video mode stays in that language.
+          language: videoCtx.language,
         };
       }
 
@@ -429,7 +433,10 @@ export default function Home() {
                   payload.endTime || "end"
                 })`
               : "") +
-            (isManual ? " (using a transcript I pasted manually)" : ""),
+            (isManual ? " (using a transcript I pasted manually)" : "") +
+            (payload.language
+              ? ` — answer my questions in ${payload.language}`
+              : ""),
           createdAt: Date.now(),
           youtubeMeta: meta,
         };
@@ -456,6 +463,7 @@ export default function Home() {
               startTime: payload.startTime,
               endTime: payload.endTime,
               transcript: payload.transcript,
+              language: payload.language,
             }),
           });
 
@@ -516,7 +524,8 @@ export default function Home() {
 
           // Store the transcript (or chunks + topicIndex for long videos) as
           // the conversation's video context so subsequent chat messages get
-          // it injected automatically.
+          // it injected automatically. Also persist the user's chosen language
+          // so every follow-up Q&A in this conversation stays in that language.
           const ctx: VideoContext = {
             url: data.url,
             videoId: data.videoId,
@@ -526,6 +535,7 @@ export default function Home() {
             chunks: data.chunks ?? undefined,
             topicIndex: data.topicIndex ?? undefined,
             loadedAt: Date.now(),
+            language: payload.language,
           };
           setVideoContext(convoId, ctx);
 
@@ -544,6 +554,9 @@ export default function Home() {
             `**URL:** ${data.url}\n` +
             `**Transcript:** ${transcriptDesc}${data.isManual ? " (manual paste)" : ""}\n` +
             (data.rangeNote ? `**Note:** ${data.rangeNote}\n` : "") +
+            (payload.language
+              ? `**Response language:** ${payload.language} — every answer in this conversation will be in ${payload.language} (timestamps, code, and tool names stay in their original form).\n`
+              : "") +
             (isLong
               ? `**Long video mode:** I built a topic index in parallel and will retrieve the most relevant chunks for each question — so even a 50-hour video can be queried accurately and fast.\n`
               : "") +
@@ -572,6 +585,9 @@ export default function Home() {
       }
 
       // ---------- Summary / Interview modes (streaming) ----------
+      const langPart = payload.language
+        ? ` — respond in ${payload.language}`
+        : "";
       let userMsgContent: string;
       if (isInterview) {
         const opts = payload.interviewOptions;
@@ -587,7 +603,8 @@ export default function Home() {
               }`
             : "") +
           (isManual ? " (using a transcript I pasted manually)" : "") +
-          (payload.instructions ? `. Instructions: ${payload.instructions}` : ".");
+          (payload.instructions ? `. Instructions: ${payload.instructions}` : ".") +
+          langPart;
       } else {
         userMsgContent =
           `Summarize this YouTube video` +
@@ -597,7 +614,8 @@ export default function Home() {
               }`
             : "") +
           (isManual ? " (using a transcript I pasted manually)" : "") +
-          (payload.instructions ? `. Instructions: ${payload.instructions}` : ".");
+          (payload.instructions ? `. Instructions: ${payload.instructions}` : ".") +
+          langPart;
       }
 
       const userMsg: ChatMessage = {
@@ -614,6 +632,7 @@ export default function Home() {
         endTime: payload.endTime,
         instructions: payload.instructions,
         transcript: payload.transcript,
+        language: payload.language,
       };
       if (isInterview && payload.interviewOptions) {
         apiPayload.difficulty = payload.interviewOptions.difficulty;

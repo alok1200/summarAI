@@ -348,3 +348,53 @@ Stage Summary:
 - Files changed: src/app/page.tsx, src/components/chat/ChatInput.tsx, src/app/api/youtube-meta/route.ts (comment only)
 - Files deleted: src/components/chat/YouTubeDialog.tsx
 - The YouTube summarization / interview / ask-about-video flow is now a single-page experience: the user pastes a URL and configures all the options (mode, time range, instructions, interview settings) in an inline panel that appears where the chat input normally sits — no second modal, no layered "page". Submitting the panel streams the result into the same chat conversation below; cancelling the panel returns the user to the normal chat input.
+
+---
+Task ID: response-language-field
+Agent: main
+Task: Add a "Response language (optional)" field to the YouTube panel — empty = default English; user-set value (e.g. "Hindi", "Spanish") = entire AI response written in that language. Applies to summary, interview Q&A, ask-about-video Q&A, and follow-up chat.
+
+Work Log:
+- Added shared `buildLanguageInstruction(language?)` helper in src/lib/youtube-transcript.ts. Returns "" when language is empty/undefined (preserves default English behavior — zero prompt bloat). When set, returns a strict instruction block telling the LLM to:
+    * Write the ENTIRE response (TL;DR, headings, explanations, quotes, chapter index, tips) in the requested language
+    * Keep timestamps, code snippets, file paths, URLs, library/framework names, and CLI tools in their ORIGINAL form (do not translate)
+    * Translate quoted speech when needed, but keep timestamp markers intact
+    * Use natural, fluent phrasing appropriate for a technical audience
+- Added `language?: string` to the YouTubeSubmitPayload interface in src/components/chat/YouTubeInlinePanel.tsx and added a "Response language (optional)" Input field right under the URL field, with helper text: "Leave empty for the default (English). If you type a language, the entire summary / Q&A / chat answer will be written in that language. Timestamps, code, and tool names stay in their original form."
+- Threaded language through page.tsx:
+    * `handleYouTube` callback now sends `language` in the API payload for ALL three modes (summary, interview, ask-about-video).
+    * For ask-about-video mode, language is stored on the conversation's `videoContext.language` so EVERY subsequent follow-up question in that conversation is answered in the chosen language (not just the first one).
+    * The welcome message in ask-about-video mode now includes a "**Response language:** X" line when set.
+    * The user-message text in chat history also notes "— respond in X" so the language preference is visible in the exported conversation.
+    * `sendMessage` and `handleRegenerate` now pass `videoContext.language` through to /api/chat.
+- Added `language?: string` to the VideoContext interface in src/store/chat.ts so the value persists across chat sessions and conversation switches.
+- Updated src/app/api/youtube-summary/route.ts:
+    * Imported `buildLanguageInstruction`.
+    * Added `language` to the `ctx` object, the `summarizeChunk` ctx signature, the `summarizeSection` ctx signature, and the `buildReduceMessages` ctx signature.
+    * Appended `buildLanguageInstruction(ctx.language)` to all 4 LLM system prompts (chunk map, section reduce, final reduce, short-video single-call).
+    * Added `**Response language:** ${language}` line to the displayed header when set.
+- Updated src/app/api/youtube-interview/route.ts:
+    * Imported `buildLanguageInstruction`.
+    * Added `language?: string` to `InterviewRequestBody` interface.
+    * Added `language` as the 5th parameter to `buildSystemPrompt` and appended `buildLanguageInstruction(language)` to the system prompt.
+    * Added `language` to the `reduceCtx` object so the long-video reduce step gets the language too.
+    * Topic extraction (`extractTopicsFromChunk`) is intentionally language-agnostic — topic names are short internal labels used only to pick which questions to ask. The user-facing language is applied only in the final reduce step.
+    * Added `**Response language:** ${language}` line to the displayed header when set.
+- Updated src/app/api/chat/route.ts:
+    * Imported `buildLanguageInstruction`.
+    * Added `language?: string` to the `VideoContextPayload` interface.
+    * Appended `buildLanguageInstruction(ctx.language)` to both `buildShortVideoSystemPrompt` and `buildLongVideoSystemPrompt`.
+- Updated src/app/api/youtube-load/route.ts:
+    * Added `language?: string` to `LoadRequestBody` (accepted but unused — youtube-load only builds a retrieval index, doesn't generate user-facing text). The language is stored on the client-side videoContext and threaded to /api/chat directly.
+
+Verification:
+    * `npx tsc --noEmit` — passes, no output.
+    * `npx eslint .` — passes, no output.
+    * Unit-equivalent check on `buildLanguageInstruction` (10 cases): empty / undefined / whitespace → "" (default English); any non-empty value → strict instruction block containing the language name, the "keep timestamps in original form" rule, and the "write ENTIRE response in X" rule. 10/10 pass.
+    * End-to-end test 1 — POST /api/youtube-summary with a 4-line manual transcript and `language: "Hindi"`: response is 3185 chars, 1996 Devanagari characters, header correctly shows "**Response language:** Hindi", TL;DR / headings / detailed breakdown all in Hindi, [0:00] timestamps preserved in original digit form.
+    * End-to-end test 2 — same payload but NO language field: response is 3977 chars, 0 Devanagari characters, fully in English, no "Response language" line in header — confirms the default-English path is unchanged.
+    * Dev server smoke test: GET / → 200, GET /api/youtube-meta → 200, GET /api/auth/me → 200, POST /api/chat → 200.
+
+Stage Summary:
+- Files changed: src/lib/youtube-transcript.ts (added buildLanguageInstruction helper), src/components/chat/YouTubeInlinePanel.tsx (added language field), src/store/chat.ts (added language to VideoContext), src/app/page.tsx (thread language through all 3 YouTube modes + persist on videoContext + thread to /api/chat), src/app/api/youtube-summary/route.ts (language in 4 prompts + header), src/app/api/youtube-interview/route.ts (language in buildSystemPrompt + reduceCtx + header), src/app/api/chat/route.ts (language in short + long video system prompts), src/app/api/youtube-load/route.ts (accept language in body)
+- Contract: empty language field → app behaves exactly as before (default English). Non-empty language field → entire AI response (summary / Q&A / chat answer) is written in that language, with timestamps/code/tool names preserved in original form. Verified end-to-end with a real LLM round-trip in Hindi.

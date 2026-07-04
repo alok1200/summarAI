@@ -9,6 +9,7 @@ import {
   fetchTranscriptWithRetry,
   parseUserTranscript,
   TIMESTAMP_RULES,
+  buildLanguageInstruction,
 } from "@/lib/youtube-transcript";
 import {
   chatComplete,
@@ -45,6 +46,8 @@ interface InterviewRequestBody {
   interviewType?: InterviewType;
   /** Optional: target role (e.g. "Senior React Developer") — improves question targeting */
   targetRole?: string;
+  /** Optional: language for the AI response (e.g. "Hindi", "Spanish"). Empty = default English. */
+  language?: string;
 }
 
 function jsonResponse(status: number, body: unknown) {
@@ -58,7 +61,8 @@ function buildSystemPrompt(
   difficulty: Difficulty,
   interviewType: InterviewType,
   questionCount: number,
-  targetRole: string | undefined
+  targetRole: string | undefined,
+  language: string | undefined
 ): string {
   const difficultyDesc: Record<Difficulty, string> = {
     beginner:
@@ -110,11 +114,12 @@ function buildSystemPrompt(
     `RULES:\n` +
     `1. Every question MUST be answerable from the transcript content. Do NOT invent facts.\n` +
     `2. Number the questions 1..${questionCount} exactly. Do not skip numbers.\n` +
-    `3. Use clear, simple English. Avoid filler phrases.\n` +
+    `3. Use clear, simple language. Avoid filler phrases.\n` +
     `4. If the transcript is too short or off-topic, still produce your best ${questionCount} ` +
     `questions and note any limitations at the top.\n` +
     `5. Vary the question style (definition, application, comparison, scenario, debugging).\n` +
-    `6. Every answer MUST cite at least one [timestamp] from the transcript where the topic is discussed. `
+    `6. Every answer MUST cite at least one [timestamp] from the transcript where the topic is discussed. ` +
+    buildLanguageInstruction(language)
   );
 }
 
@@ -135,6 +140,10 @@ async function extractTopicsFromChunk(
     targetRole: string | undefined;
   }
 ): Promise<string> {
+  // NOTE: topic extraction is intentionally language-agnostic — the topic
+  // names are short labels used internally to pick which questions to ask.
+  // The user-facing language is applied only in the final reduce step
+  // (buildSystemPrompt) so the actual Q&A reads in the requested language.
   const systemPrompt =
     `You are an interview coach analyzing ONE segment of a long YouTube video. ` +
     `Your job: extract a structured list of question-worthy TOPICS from this segment. ` +
@@ -185,6 +194,7 @@ function buildReduceMessages(
     questionCount: number;
     targetRole: string | undefined;
     instructions: string | undefined;
+    language: string | undefined;
     actualStartTime: number;
     actualEndTime: number;
     totalSegments: number;
@@ -194,7 +204,8 @@ function buildReduceMessages(
     ctx.difficulty,
     ctx.interviewType,
     ctx.questionCount,
-    ctx.targetRole
+    ctx.targetRole,
+    ctx.language
   );
 
   const mergedTopics = topicLists
@@ -247,6 +258,7 @@ export async function POST(req: NextRequest) {
     const interviewType: InterviewType =
       (body.interviewType as InterviewType) || "technical";
     const targetRole: string | undefined = body.targetRole?.trim() || undefined;
+    const language: string = (body.language ?? "").trim();
 
     parsedVideoId = extractVideoId(url);
     if (!parsedVideoId) {
@@ -342,6 +354,7 @@ export async function POST(req: NextRequest) {
       (targetRole ? `**Target role:** ${targetRole}\n` : "") +
       (rangeNote ? `**Note:** ${rangeNote}\n` : "") +
       (instructions ? `**Your instructions:** ${instructions}\n` : "") +
+      (language ? `**Response language:** ${language}\n` : "") +
       `\n---\n\n`;
 
     // Decide whether to use map-reduce (long videos) or a single LLM call.
@@ -357,7 +370,8 @@ export async function POST(req: NextRequest) {
         difficulty,
         interviewType,
         questionCount,
-        targetRole
+        targetRole,
+        language || undefined
       );
 
       const userMessage =
@@ -411,6 +425,7 @@ export async function POST(req: NextRequest) {
       questionCount,
       targetRole,
       instructions: instructions || undefined,
+      language: language || undefined,
       actualStartTime,
       actualEndTime,
       totalSegments: filtered.length,

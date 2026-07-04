@@ -151,6 +151,12 @@ export interface YouTubeSubmitPayload {
   mode: YouTubeMode;
   /** When mode === "interview", these options are sent along. */
   interviewOptions?: InterviewOptions;
+  /**
+   * Optional: language for the AI response (e.g. "Hindi", "Spanish",
+   * "Japanese", "French"). When empty, the AI uses its default (English).
+   * Honored across summary, interview Q&A, ask-about-video, and chat.
+   */
+  language?: string;
 }
 
 interface YouTubeInlinePanelProps {
@@ -206,6 +212,7 @@ export function YouTubeInlinePanel({
   const [startTime, setStartTime] = useState("");
   const [endTime, setEndTime] = useState("");
   const [instructions, setInstructions] = useState("");
+  const [language, setLanguage] = useState("");
   const [touched, setTouched] = useState(false);
   const [mode, setMode] = useState<YouTubeMode>("summary");
   const [fetchMode, setFetchMode] = useState<"auto" | "manual">("auto");
@@ -249,6 +256,7 @@ export function YouTubeInlinePanel({
       setStartTime(lastPayload.startTime);
       setEndTime(lastPayload.endTime);
       setInstructions(lastPayload.instructions);
+      setLanguage(lastPayload.language ?? "");
       setMode(lastPayload.mode);
       if (lastPayload.interviewOptions) {
         setDifficulty(lastPayload.interviewOptions.difficulty);
@@ -293,6 +301,7 @@ export function YouTubeInlinePanel({
               targetRole: targetRole.trim() || undefined,
             }
           : undefined,
+      language: language.trim() || undefined,
     };
     setLastPayload(payload);
     onSubmit(payload);
@@ -301,6 +310,7 @@ export function YouTubeInlinePanel({
     setStartTime("");
     setEndTime("");
     setInstructions("");
+    setLanguage("");
     setTranscript("");
     setTouched(false);
     setFetchMode("auto");
@@ -468,6 +478,25 @@ export function YouTubeInlinePanel({
                   <VideoPreview key={videoId} videoId={videoId} />
                 </>
               )}
+            </div>
+
+            {/* Response language (optional). Empty = default English. */}
+            <div className="space-y-1.5">
+              <Label htmlFor="yt-language">
+                Response language (optional)
+              </Label>
+              <Input
+                id="yt-language"
+                placeholder="e.g. Hindi, Spanish, Japanese, French (empty = English)"
+                value={language}
+                onChange={(e) => setLanguage(e.target.value)}
+              />
+              <p className="text-[11px] text-zinc-500">
+                Leave empty for the default (English). If you type a language,
+                the entire summary / Q&amp;A / chat answer will be written in
+                that language. Timestamps, code, and tool names stay in their
+                original form.
+              </p>
             </div>
 
             {/* Interview-mode options */}

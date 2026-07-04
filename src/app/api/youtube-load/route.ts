@@ -25,6 +25,15 @@ interface LoadRequestBody {
   endTime?: string;
   /** Optional: user-pasted transcript (bypasses auto-fetch) */
   transcript?: string;
+  /**
+   * Optional: language for the AI's responses during ask-about-video Q&A.
+   * youtube-load itself doesn't generate user-facing text (the topic index
+   * it builds is internal retrieval metadata), so we accept but ignore this
+   * field. The client stores it on the videoContext and threads it to
+   * /api/chat, which is where the language instruction actually gets
+   * injected into the system prompt.
+   */
+  language?: string;
 }
 
 function jsonResponse(status: number, body: unknown) {

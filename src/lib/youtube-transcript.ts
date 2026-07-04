@@ -132,6 +132,39 @@ export const TIMESTAMP_RULES =
   `- In the Chapter Index (or any "jump to" list), list time ranges as ` +
   `[start]–[end] with a short title, e.g. "[3:25]–[7:48] React hooks intro".`;
 
+/**
+ * Build the LANGUAGE INSTRUCTION block that gets appended to YouTube-related
+ * system prompts.
+ *
+ * Behavior:
+ *   - If `language` is empty/undefined → returns an empty string. The LLM
+ *     uses its default (English) — preserves the original "out of the box"
+ *     behavior when the user doesn't pick a language.
+ *   - If `language` is set (e.g. "Hindi", "Spanish", "Japanese", "français")
+ *     → returns a strict instruction telling the LLM to write the entire
+ *     response in that language, while keeping timestamps, code, and
+ *     technical terms in their original form.
+ *
+ * This is shared across /api/youtube-summary, /api/youtube-interview,
+ * /api/youtube-load, and /api/chat (ask-about-video mode) so the user's
+ * language preference is honored everywhere consistently.
+ */
+export function buildLanguageInstruction(language?: string): string {
+  const trimmed = (language ?? "").trim();
+  if (!trimmed) return "";
+  return (
+    `\n\nLANGUAGE INSTRUCTION (very important):\n` +
+    `- Write the ENTIRE response in ${trimmed}. This includes the TL;DR, every section heading, ` +
+    `every explanation, every quote/insight, the chapter index, and any tips or notes.\n` +
+    `- Keep timestamps (e.g. [3:25], [1:25:30]), code snippets, file paths, URLs, library/framework ` +
+    `names, and command-line tools in their ORIGINAL form — do NOT translate them.\n` +
+    `- If the transcript is in a different language, still answer in ${trimmed}. Translate ` +
+    `quoted speech when needed, but keep the timestamp markers intact.\n` +
+    `- Use natural, fluent ${trimmed} appropriate for a technical audience. Avoid awkward ` +
+    `literal translations of idioms or domain terms that have well-known ${trimmed} equivalents.`
+  );
+}
+
 function decodeEntities(s: string): string {
   return s
     .replace(/&amp;/g, "&")

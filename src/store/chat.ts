@@ -69,6 +69,13 @@ export interface VideoContext {
   chunks?: VideoChunk[];
   /** When the video was loaded — for display purposes. */
   loadedAt: number;
+  /**
+   * Optional: language the user wants the AI to respond in for subsequent
+   * questions about this video. Persisted across the conversation so every
+   * follow-up Q&A in ask-about-video mode stays in the chosen language.
+   * Empty/undefined = default (English).
+   */
+  language?: string;
 }
 
 export interface ChatMessage {

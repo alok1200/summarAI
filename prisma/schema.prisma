@@ -11,13 +11,26 @@ datasource db {
 }
 
 model User {
-  id           String    @id @default(cuid())
-  email        String    @unique
+  id           String   @id @default(cuid())
+  email        String   @unique
   name         String
-  passwordHash String
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
-  sessions     Session[]
+
+  // Password hash — nullable because OAuth-only users (Google Sign-In) have
+  // no password. Email/password users always have this set.
+  passwordHash String?
+
+  // OAuth fields — nullable because email/password users have no OAuth
+  // provider. When `provider` is set, `providerAccountId` is the unique ID
+  // returned by the OAuth provider (e.g. Google's `sub` claim).
+  provider          String? // "credentials" (default) | "google"
+  providerAccountId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  sessions  Session[]
+
+  // Speeds up OAuth login lookups: WHERE provider=? AND providerAccountId=?
+  @@index([provider, providerAccountId])
 }
 
 model Session {

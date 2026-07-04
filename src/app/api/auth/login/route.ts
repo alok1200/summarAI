@@ -55,7 +55,12 @@ export async function POST(req: NextRequest) {
     const user = await db.user.findUnique({ where: { email } });
     // Identical response for "no such user" and "wrong password" — prevents
     // user enumeration via response-timing or message inspection.
-    if (!user || !verifyPassword(password, user.passwordHash)) {
+    //
+    // Note: `passwordHash` is nullable because Google-only users have no
+    // password. If `passwordHash` is null, the user must sign in with Google
+    // — we treat that the same as "no such user" (same 401 + same message)
+    // so an attacker can't enumerate which emails have Google-only accounts.
+    if (!user || !user.passwordHash || !verifyPassword(password, user.passwordHash)) {
       logger.warn("auth.login.failed", { requestId, email });
       return NextResponse.json(
         { error: "Invalid email or password." },

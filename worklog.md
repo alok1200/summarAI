@@ -1057,3 +1057,191 @@ Stage Summary:
 
   Files removed:
     src/middleware.ts                (renamed to src/proxy.ts for Next.js 16)
+
+---
+Task ID: 19
+Agent: main
+Task: Add "Sign in with Google" option to login and signup screens.
+
+Work Log:
+
+=== APPROACH — hand-rolled Google OAuth (no NextAuth) ===
+
+The project has `next-auth` installed but not wired up. Hand-rolling the
+Google Authorization Code flow is simpler and reuses the existing session
+infrastructure (same Session table, same `chatgpt_session` cookie, same
+`createSession()` + `setSessionCookie()` helpers from `src/lib/auth.ts`).
+No new dependencies needed.
+
+Flow:
+  1. User clicks "Sign in with Google" → browser navigates to
+     GET /api/auth/google
+  2. Server generates a state token (HMAC-signed with SESSION_SECRET),
+     stores it in a short-lived (10min) httpOnly `google_oauth_state`
+     cookie, 302-redirects to Google's consent screen.
+  3. User consents → Google redirects to
+     GET /api/auth/google/callback?code=...&state=...
+  4. Server verifies the state query param matches the state cookie
+     (constant-time comparison — CSRF defense).
+  5. Server exchanges `code` for tokens at Google's token endpoint.
+  6. Server fetches user profile from Google's userinfo endpoint.
+  7. Server looks up the user by (provider=google, providerAccountId=sub):
+     - Found → use that user.
+     - Not found, but a user with that email exists → LINK the Google
+       account to the existing user (safe because Google verified the
+       email). User can now sign in with either method.
+     - Not found at all → CREATE a new user with provider=google,
+       passwordHash=null (OAuth-only user).
+  8. Server creates a session, sets the session cookie, 302-redirects
+     to / (chat UI).
+  9. On any error, server 302-redirects to /?auth_error=... so the
+     LoginScreen can display the message.
+
+=== SCHEMA CHANGE — User model gains OAuth fields, passwordHash becomes nullable ===
+
+prisma/schema.prisma:
+  - `passwordHash String?` (was `String`, required) — nullable now
+    because Google-only users have no password.
+  - Added `provider String?` — "credentials" (default) | "google".
+  - Added `providerAccountId String?` — Google's stable `sub` ID.
+  - Added `@@index([provider, providerAccountId])` for fast OAuth
+    lookups.
+
+Applied via `npx prisma db push`. Backward-compatible — existing rows
+get `provider=null, providerAccountId=null, passwordHash=<unchanged>`,
+which the app treats as "email/password user" (the default).
+
+=== NEW FILES ===
+
+src/lib/google-oauth.ts (380 lines)
+  - isGoogleOAuthConfigured() — checks all 3 env vars are set.
+  - makeStateToken() — `<random>.<hmac>`, signed with SESSION_SECRET.
+  - verifyStateToken() — constant-time HMAC verification.
+  - setStateCookie() / verifyAndConsumeStateCookie() — httpOnly,
+    sameSite=lax (must be lax so the browser sends it on the top-level
+    redirect back from Google), 10-minute TTL, one-shot (always cleared
+    after read, even on failure).
+  - buildAuthUrl(state) — Google consent URL with scopes
+    openid+email+profile and `prompt=select_account` so users with
+    multiple Google accounts can pick which to use.
+  - exchangeCodeForTokens(code) — POST to Google's token endpoint.
+  - fetchGoogleUserInfo(accessToken) — GET Google's userinfo endpoint,
+    returns {sub, email, emailVerified, name, picture}.
+  - buildErrorRedirect(message) — returns `/?auth_error=<encoded>` for
+    the callback to use when something goes wrong.
+
+src/app/api/auth/google/route.ts (GET)
+  - Returns 503 with setup instructions if env vars aren't configured.
+  - Otherwise: generates state, sets cookie, 302 to Google.
+
+src/app/api/auth/google/callback/route.ts (GET)
+  - Full flow: verify state → exchange code → fetch userinfo →
+    find/link/create user → create session → set cookie → 302 to /.
+  - Handles `error=access_denied` (user clicked Cancel) gracefully.
+  - Handles email-not-verified (rejects with a clear message).
+  - All error paths redirect to /?auth_error=... so the user sees the
+    message on the login screen.
+
+=== MODIFIED FILES ===
+
+prisma/schema.prisma
+  - See "SCHEMA CHANGE" above.
+
+src/components/chat/LoginScreen.tsx (rewritten)
+  - Added inline GoogleGLogo component (official multicolor SVG paths,
+    no new dependency).
+  - Added "Sign in / Sign up with Google" button above the email form,
+    with a "or continue with email" divider below.
+  - handleGoogleSignIn() sets `submitting=true` and navigates to
+    /api/auth/google (full-page navigation — the browser must follow
+    the 302 chain through Google and back).
+  - Added useSearchParams() hook to read the `auth_error` query param
+    set by the callback on failure; displays it in the existing error
+    banner, then strips the URL so it doesn't persist across reloads.
+  - Wrapped the inner component in <Suspense> because useSearchParams
+    forces dynamic rendering in Next.js — the Suspense fallback shows
+    the brand header + spinner so the user sees something immediately.
+
+src/app/api/auth/login/route.ts
+  - Updated the password-check guard to handle nullable `passwordHash`:
+    if `user.passwordHash` is null (Google-only user), the login fails
+    with the same "Invalid email or password." message. This is the
+    same response as "user not found", so an attacker can't enumerate
+    which emails have Google-only accounts.
+
+.env.example
+  - Replaced the placeholder OAuth section with a 5-minute setup guide:
+    Google Cloud Console steps, redirect URI format, dev vs prod URLs,
+    scope list, and account-linking behavior documentation.
+  - Uncommented GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI
+    so they're active env vars (not just reserved names).
+
+=== GRACEFUL DEGRADATION ===
+
+If the GOOGLE_* env vars aren't set:
+  - The "Sign in with Google" button is still visible on the login
+    screen (the frontend doesn't know whether the server is configured).
+  - When clicked, GET /api/auth/google returns 503 with a JSON error:
+    "Google Sign-In is not configured. Set GOOGLE_CLIENT_ID,
+    GOOGLE_CLIENT_SECRET, and GOOGLE_REDIRECT_URI in your .env file."
+  - This is intentional — operators see immediately what's wrong, and
+    the error message tells them exactly which env vars to set.
+  - Future improvement: add a GET /api/auth/google/enabled endpoint
+    that returns {enabled: boolean}, and hide the button client-side
+    when not configured. Out of scope for this task.
+
+=== SECURITY ===
+
+  - State parameter (CSRF defense): HMAC-signed with SESSION_SECRET,
+    stored in a 10-minute httpOnly cookie, verified constant-time on
+    callback, one-shot (always cleared after read).
+  - Email verification: we require `email_verified=true` from Google's
+    userinfo response. If the user's Google email isn't verified, the
+    callback rejects with a clear message.
+  - Account linking: when a Google user's email matches an existing
+    email/password user, we LINK the accounts (set provider fields).
+    This is safe because Google verified the email. We do NOT clear
+    the existing passwordHash — the user can sign in with either method.
+  - User enumeration: Google-only users (passwordHash=null) get the
+    same "Invalid email or password." 401 as nonexistent users when
+    they try to log in via the password form. (They should use the
+    Google button instead.)
+  - Scopes: openid + email + profile only. No Drive/Calendar/etc.
+  - No refresh tokens requested (access_type=online) — we only need
+    the user info once per login.
+
+=== VERIFICATION ===
+
+  - npx tsc --noEmit → clean, 0 errors.
+  - bun test → 153 pass, 0 fail, 313 expect() calls.
+  - npm run build → clean, 0 warnings. New routes registered:
+      ƒ /api/auth/google
+      ƒ /api/auth/google/callback
+  - Smoke test (production server, no GOOGLE_* env vars set):
+      GET /api/auth/google → 503 with clear setup message ✓
+      GET /api/health → 200 ✓
+      POST /api/auth/signup → 200 ✓
+      "Sign in with Google" button present in compiled JS bundle ✓
+  - Existing email/password flow still works (backward-compatible).
+
+Stage Summary:
+
+  - Users can now sign in or sign up with a single click via Google.
+  - Existing email/password users are unaffected; if they later use
+    Google Sign-In with the same email, the accounts link automatically.
+  - Google-only users have no password (passwordHash is null in the DB).
+  - The flow is fully production-grade: state-parameter CSRF defense,
+    email-verification check, graceful error handling, structured
+    logging at every step.
+  - The button is always visible; if GOOGLE_* env vars aren't set,
+    clicking it returns a clear 503 with setup instructions.
+  - Files added:
+      src/lib/google-oauth.ts
+      src/app/api/auth/google/route.ts
+      src/app/api/auth/google/callback/route.ts
+  - Files changed:
+      prisma/schema.prisma (passwordHash nullable, +provider, +providerAccountId)
+      src/components/chat/LoginScreen.tsx (Google button + error display)
+      src/app/api/auth/login/route.ts (nullable passwordHash handling)
+      .env.example (Google OAuth setup guide)
+  - DB migration applied via `prisma db push` (backward-compatible).

@@ -662,7 +662,7 @@ export async function POST(req: NextRequest) {
     }
 
     // Apply time-range filter (skipped for plain-text manual pastes).
-    const filtered = skipTimeFilter
+    let filtered = skipTimeFilter
       ? allSegments
       : allSegments.filter((s) => {
           if (startTime !== undefined && s.start < startTime) return false;
@@ -670,15 +670,21 @@ export async function POST(req: NextRequest) {
           return true;
         });
 
-    if (filtered.length === 0) {
-      // Build a more helpful error message that explains WHY nothing matched,
-      // so the user knows how to fix it (remove the time range, paste more
-      // transcript, etc.).
+    let rangeNote: string | undefined;
+    if (skipTimeFilter) {
+      rangeNote =
+        "Time range was ignored because the pasted transcript has no timestamps — summarized the whole paste instead.";
+    } else if (filtered.length === 0 && allSegments.length > 0) {
+      // The user asked for a specific time range, but no transcript segments
+      // fall within it. Instead of returning a frustrating error that blocks
+      // their workflow, fall back to summarizing the WHOLE transcript with a
+      // clear note explaining what happened. The user always gets a useful
+      // summary; they can refine the time range on a subsequent attempt if
+      // needed.
+      filtered = allSegments;
       const totalSegs = allSegments.length;
-      const firstStart =
-        totalSegs > 0 ? Math.floor(allSegments[0].start) : 0;
-      const lastStart =
-        totalSegs > 0 ? Math.floor(allSegments[totalSegs - 1].start) : 0;
+      const firstStart = Math.floor(allSegments[0].start);
+      const lastStart = Math.floor(allSegments[totalSegs - 1].start);
       const rangeLabel =
         startTime !== undefined && endTime !== undefined
           ? `${formatTime(startTime)} – ${formatTime(endTime)}`
@@ -687,16 +693,10 @@ export async function POST(req: NextRequest) {
           : endTime !== undefined
           ? `before ${formatTime(endTime)}`
           : "(no range)";
-      return jsonResponse(400, {
-        error:
-          `No transcript segments were found in the requested time range (${rangeLabel}). ` +
-          `The ${isManual ? "pasted transcript" : "video transcript"} covers ` +
-          `${formatTime(firstStart)} – ${formatTime(lastStart)} ` +
-          `(${totalSegs} segments). ` +
-          (isManual
-            ? "If you pasted plain text without timestamps, remove the start/end times and try again — we'll summarize the whole paste. "
-            : "Adjust the start/end times to overlap with the transcript and try again. "),
-      });
+      rangeNote =
+        `No segments were found in your requested range (${rangeLabel}), so the whole transcript ` +
+        `(${formatTime(firstStart)} – ${formatTime(lastStart)}, ${totalSegs} segments) was summarized instead. ` +
+        `Adjust the time range to overlap with the transcript and try again for a more targeted summary.`;
     }
 
     const actualStartTime = filtered[0].start;
@@ -724,9 +724,7 @@ export async function POST(req: NextRequest) {
       instructions,
       truncated,
       isManual,
-      skipTimeFilter
-        ? "Time range was ignored because the pasted transcript has no timestamps — summarized the whole paste instead."
-        : undefined
+      rangeNote
     );
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Unknown error";

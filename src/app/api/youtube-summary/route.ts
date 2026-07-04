@@ -23,6 +23,17 @@ interface CacheEntry {
 const transcriptCache = new Map<string, CacheEntry>();
 const CACHE_TTL_MS = 1000 * 60 * 10; // 10 minutes
 
+// In-memory cache for video metadata (title/author) fetched via oEmbed.
+// This is public data and YouTube doesn't bot-block it.
+interface MetaCacheEntry {
+  title: string;
+  author: string;
+  thumbnailUrl: string;
+  fetchedAt: number;
+}
+const metaCache = new Map<string, MetaCacheEntry>();
+const META_CACHE_TTL_MS = 1000 * 60 * 60; // 1 hour
+
 function extractVideoId(url: string): string | null {
   const patterns: RegExp[] = [
     /(?:youtube\.com\/watch\?v=)([A-Za-z0-9_-]{11})/,
@@ -76,10 +87,48 @@ interface CaptionTrack {
 }
 
 /**
- * Strategy 1 (most reliable): use YouTube's internal `youtubei/v1/player` API
- * with the ANDROID client identity. This bypasses most "Sign in to confirm
- * you're not a bot" blocks because YouTube trusts requests from its own
- * Android app.
+ * Fetch lightweight video metadata (title, author, thumbnail) via YouTube's
+ * public oEmbed endpoint. This endpoint is NOT bot-protected because it's
+ * designed for embed previews. We use it so the user can at least see the
+ * video title in the chat bubble when the transcript fetch is bot-blocked.
+ */
+async function fetchVideoMeta(
+  videoId: string
+): Promise<MetaCacheEntry | null> {
+  const cached = metaCache.get(videoId);
+  if (cached && Date.now() - cached.fetchedAt < META_CACHE_TTL_MS) {
+    return cached;
+  }
+  try {
+    const res = await fetch(
+      `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`,
+      { headers: { "User-Agent": UA, "Accept-Language": "en-US,en;q=0.9" } }
+    );
+    if (!res.ok) return null;
+    const json = (await res.json()) as {
+      title?: string;
+      author_name?: string;
+      thumbnail_url?: string;
+    };
+    if (!json.title) return null;
+    const entry: MetaCacheEntry = {
+      title: json.title,
+      author: json.author_name || "Unknown",
+      thumbnailUrl:
+        json.thumbnail_url || `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`,
+      fetchedAt: Date.now(),
+    };
+    metaCache.set(videoId, entry);
+    return entry;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Strategy 1: use YouTube's internal `youtubei/v1/player` API with the ANDROID
+ * client identity. Bypasses some bot blocks because YouTube trusts requests
+ * from its own Android app.
  */
 async function fetchCaptionTracksViaAndroidPlayer(
   videoId: string
@@ -136,8 +185,8 @@ async function fetchCaptionTracksViaAndroidPlayer(
 }
 
 /**
- * Strategy 2 (fallback): scrape the watch page HTML. Works for many public
- * videos but is the most likely to hit "Sign in to confirm you're not a bot".
+ * Strategy 2: scrape the watch page HTML. Works for many public videos but
+ * is the most likely to hit "Sign in to confirm you're not a bot".
  */
 async function fetchCaptionTracksViaWatchPage(
   videoId: string
@@ -186,6 +235,74 @@ async function fetchCaptionTracksViaWatchPage(
   return Array.isArray(tracks) && tracks.length > 0
     ? (tracks as CaptionTrack[])
     : null;
+}
+
+/**
+ * Strategy 3: use the `youtube-transcript` npm package. It uses InnerTube +
+ * web scraping with its own retry logic and parser, which sometimes succeeds
+ * where the custom strategies above fail (different fingerprint, different
+ * request timing).
+ */
+async function fetchTranscriptViaYoutubeTranscriptLib(
+  videoId: string
+): Promise<TranscriptSegment[] | null> {
+  try {
+    const mod = await import("youtube-transcript");
+    const result = await mod.YoutubeTranscript.fetchTranscript(videoId, {
+      lang: "en",
+    });
+    if (!Array.isArray(result) || result.length === 0) return null;
+    return result.map((r) => ({
+      start: r.offset ?? 0,
+      dur: r.duration ?? 0,
+      text: (r.text || "").replace(/\n/g, " ").trim(),
+    })).filter((s) => s.text.length > 0);
+  } catch (e) {
+    const msg = (e as Error)?.message || "";
+    throw new Error(`youtube-transcript lib: ${msg}`);
+  }
+}
+
+/**
+ * Strategy 4: use `youtubei.js` (Innertube) with the WEB client. This library
+ * maintains its own client version fingerprints and parses the InnerTube
+ * response with the latest schema, which sometimes bypasses blocks.
+ */
+async function fetchTranscriptViaInnertube(
+  videoId: string
+): Promise<TranscriptSegment[] | null> {
+  try {
+    const mod = await import("youtubei.js");
+    const Innertube = mod.default;
+    const yt = await Innertube.create();
+    const info = await yt.getInfo(videoId);
+    const transcriptInfo = await info.getTranscript();
+    const body = transcriptInfo?.transcript?.content?.body;
+    // The segment list lives in `initial_segments` on TranscriptSegmentList;
+    // filter out section headers (which don't have start_ms).
+    const rawSegments: any[] = (body as any)?.initial_segments ?? [];
+    if (rawSegments.length === 0) return null;
+    const segments: TranscriptSegment[] = [];
+    for (const s of rawSegments) {
+      // Only TranscriptSegment instances have start_ms / snippet
+      if (typeof s.start_ms === "undefined") continue;
+      const startMs = parseInt(s.start_ms ?? "0", 10);
+      const endMs = parseInt(s.end_ms ?? "0", 10);
+      const text: string = s.snippet?.text ?? "";
+      const cleaned = String(text).replace(/\n/g, " ").trim();
+      if (cleaned.length > 0) {
+        segments.push({
+          start: startMs / 1000,
+          dur: Math.max(0, (endMs - startMs) / 1000),
+          text: cleaned,
+        });
+      }
+    }
+    return segments.length > 0 ? segments : null;
+  } catch (e) {
+    const msg = (e as Error)?.message || "";
+    throw new Error(`youtubei.js: ${msg}`);
+  }
 }
 
 function pickBestTrack(tracks: CaptionTrack[]): CaptionTrack {
@@ -294,6 +411,13 @@ async function fetchAndParseCaptionTracks(
   return segments;
 }
 
+/**
+ * Try multiple strategies in order to fetch the transcript. Each strategy
+ * has different bot-detection characteristics, so what fails on one may
+ * succeed on another. Strategies that return caption tracks (instead of
+ * pre-parsed segments) go through fetchAndParseCaptionTracks for the actual
+ * download.
+ */
 async function fetchTranscriptWithRetry(
   videoId: string
 ): Promise<TranscriptSegment[]> {
@@ -303,10 +427,10 @@ async function fetchTranscriptWithRetry(
     return cached.segments;
   }
 
-  // Try each strategy in order.
-  // 1. ANDROID player API (fastest, often works for non-protected videos)
-  // 2. Watch page scrape (fallback; more likely to hit 429)
-  const strategies: {
+  // Caption-track-returning strategies (need a second fetch to get the
+  // actual transcript text). These are tried first because they're more
+  // reliable when they work.
+  const trackStrategies: {
     name: string;
     fn: (id: string) => Promise<CaptionTrack[] | null>;
   }[] = [
@@ -320,10 +444,30 @@ async function fetchTranscriptWithRetry(
     },
   ];
 
+  // Pre-parsed-segment-returning strategies (single fetch, library handles
+  // everything). These are tried last as fallbacks because their parser
+  // schemas may lag behind YouTube's current format.
+  const directStrategies: {
+    name: string;
+    fn: (id: string) => Promise<TranscriptSegment[] | null>;
+  }[] = [
+    {
+      name: "youtube-transcript library",
+      fn: fetchTranscriptViaYoutubeTranscriptLib,
+    },
+    {
+      name: "youtubei.js (Innertube)",
+      fn: fetchTranscriptViaInnertube,
+    },
+  ];
+
   let lastError: Error | null = null;
+  let botBlockedSeen = false;
+  let botBlockedMessage = "";
   let segments: TranscriptSegment[] | null = null;
 
-  for (const strategy of strategies) {
+  // Try caption-track strategies first
+  for (const strategy of trackStrategies) {
     try {
       console.log(`[youtube-summary] Trying ${strategy.name} for ${videoId}`);
       const tracks = await strategy.fn(videoId);
@@ -341,25 +485,67 @@ async function fetchTranscriptWithRetry(
     } catch (e) {
       const msg = (e as Error).message;
       console.log(`[youtube-summary] ✗ ${strategy.name} failed: ${msg}`);
-      lastError = e as Error;
-      // Small delay between strategies to avoid hammering YouTube
+      // Track if ANY strategy reported a bot-block signature — we use this
+      // later to classify the final error. Don't overwrite lastError with
+      // a non-bot error if we've already seen a bot block.
+      if (/sign in|bot|consent|429|rate.?limit|captcha|too many requests/i.test(msg)) {
+        botBlockedSeen = true;
+        botBlockedMessage = msg;
+        lastError = e as Error;
+      } else if (!botBlockedSeen) {
+        lastError = e as Error;
+      }
       await new Promise((r) => setTimeout(r, 400));
     }
   }
 
+  // If track strategies failed, try direct-fetch strategies
   if (!segments || segments.length === 0) {
-    const msg = lastError?.message || "";
-    // Distinguish "bot blocked" from "no captions" so we can give the user
-    // actionable guidance.
-    if (/sign in|bot|consent|429|rate.?limit|captcha/i.test(msg)) {
-      const err = new Error(
+    for (const strategy of directStrategies) {
+      try {
+        console.log(`[youtube-summary] Trying ${strategy.name} for ${videoId}`);
+        const result = await strategy.fn(videoId);
+        if (!result || result.length === 0) {
+          console.log(
+            `[youtube-summary] ✗ ${strategy.name} returned no segments`
+          );
+          continue;
+        }
+        console.log(
+          `[youtube-summary] ✓ ${strategy.name} returned ${result.length} segments`
+        );
+        segments = result;
+        break;
+      } catch (e) {
+        const msg = (e as Error).message;
+        console.log(`[youtube-summary] ✗ ${strategy.name} failed: ${msg}`);
+        if (/sign in|bot|consent|429|rate.?limit|captcha|too many requests/i.test(msg)) {
+          botBlockedSeen = true;
+          botBlockedMessage = msg;
+          lastError = e as Error;
+        } else if (!botBlockedSeen) {
+          lastError = e as Error;
+        }
+        await new Promise((r) => setTimeout(r, 400));
+      }
+    }
+  }
+
+  if (!segments || segments.length === 0) {
+    // If ANY strategy reported a bot block, classify the error as BOT_BLOCKED
+    // regardless of what the last strategy's error message said. The bot block
+    // is the root cause; the later strategies' 400/parse errors are downstream
+    // symptoms.
+    if (botBlockedSeen) {
+      const friendlyMessage =
         "YouTube is asking us to sign in to confirm we're not a bot for this video. " +
-          "This happens on videos with stricter bot protection (e.g. some TED talks, music videos, livestreams). " +
-          "You can still get a summary by clicking 'Paste transcript manually' and pasting the transcript text from YouTube's 'Show transcript' panel."
-      );
+        "This happens on videos with stricter bot protection (e.g. some TED talks, music videos, livestreams). " +
+        "You can still get a summary by clicking 'Paste transcript manually' and pasting the transcript text from YouTube's 'Show transcript' panel.";
+      const err = new Error(friendlyMessage);
       (err as any).code = "BOT_BLOCKED";
       throw err;
     }
+    const msg = lastError?.message || "";
     throw new Error(
       "This video has no captions or transcript available, or YouTube blocked the request. " +
         "Try a different video with English captions enabled, or use the 'Paste transcript manually' option." +
@@ -383,12 +569,6 @@ async function fetchTranscriptWithRetry(
  *   - "1:23:45 text"
  *   - Plain text (no timestamps) — each non-empty line becomes a segment
  *     with a sequential 5-second offset.
- *
- * Returns both the segments AND whether any line had a real timestamp, so the
- * caller can decide whether time-range filtering is meaningful. If the user
- * pasted plain text without timestamps, applying a time-range filter would
- * silently drop everything (since all auto-generated timestamps start near 0),
- * which is almost never what they want.
  */
 function parseUserTranscript(raw: string): {
   segments: TranscriptSegment[];
@@ -437,7 +617,8 @@ async function streamSummary(
   instructions: string,
   transcriptText: string,
   isManual: boolean,
-  rangeNote?: string
+  rangeNote: string | undefined,
+  videoMeta: MetaCacheEntry | null
 ) {
   const durationSec = actualEndTime - actualStartTime;
 
@@ -452,6 +633,9 @@ async function streamSummary(
   const userMessage =
     `Please summarize the following YouTube video transcript.\n\n` +
     `Video URL: ${url}\n` +
+    (videoMeta
+      ? `Video title: ${videoMeta.title}\nVideo channel: ${videoMeta.author}\n`
+      : "") +
     `Selected time range: ${formatTime(actualStartTime)} – ${formatTime(
       actualEndTime
     )}  (about ${Math.round(durationSec)}s, ${filteredCount} segments)\n\n` +
@@ -477,6 +661,9 @@ async function streamSummary(
   const sourceLabel = isManual ? " (manual paste)" : "";
   const header =
     `**▶️ YouTube Video Summary${sourceLabel}**\n\n` +
+    (videoMeta
+      ? `**Title:** ${videoMeta.title}\n**Channel:** ${videoMeta.author}\n`
+      : "") +
     `**URL:** ${url}\n` +
     `**Time range:** ${formatTime(actualStartTime)} – ${formatTime(
       actualEndTime
@@ -511,6 +698,9 @@ async function streamSummary(
 }
 
 export async function POST(req: NextRequest) {
+  // Extract videoId up here so the catch block can use it for fetching video
+  // metadata even after the body has been consumed.
+  let parsedVideoId: string | null = null;
   try {
     const body = await req.json();
     const url: string = body.url ?? "";
@@ -520,13 +710,14 @@ export async function POST(req: NextRequest) {
     // Optional: user-pasted transcript. When provided, we skip fetching.
     const manualTranscript: string = (body.transcript ?? "").trim();
 
-    const videoId = extractVideoId(url);
-    if (!videoId) {
+    parsedVideoId = extractVideoId(url);
+    if (!parsedVideoId) {
       return jsonResponse(400, {
         error:
           "Could not extract a video ID from this URL. Please paste a YouTube link like https://www.youtube.com/watch?v=…",
       });
     }
+    const videoId = parsedVideoId;
 
     const startTime = parseTimeString(startTimeStr);
     const endTime = parseTimeString(endTimeStr);
@@ -543,10 +734,6 @@ export async function POST(req: NextRequest) {
 
     let allSegments: TranscriptSegment[];
     let isManual = false;
-    // For manual pastes that contained no timestamps, time-range filtering
-    // doesn't make sense (every segment was assigned a synthetic 5s-offset
-    // timestamp starting from 0, so any non-trivial start time would drop
-    // everything). We remember this flag and skip the filter below.
     let skipTimeFilter = false;
 
     if (manualTranscript) {
@@ -562,9 +749,6 @@ export async function POST(req: NextRequest) {
       allSegments = parsed;
       isManual = true;
       if (!hasTimestamps && (startTime !== undefined || endTime !== undefined)) {
-        // The user pasted plain text but asked for a time range. We can't
-        // meaningfully filter plain text by time, so we summarize the whole
-        // paste and tell them about it in the summary header.
         skipTimeFilter = true;
       }
     } else {
@@ -585,12 +769,6 @@ export async function POST(req: NextRequest) {
       rangeNote =
         "Time range was ignored because the pasted transcript has no timestamps — summarized the whole paste instead.";
     } else if (filtered.length === 0 && allSegments.length > 0) {
-      // The user asked for a specific time range, but no transcript segments
-      // fall within it. Instead of returning a frustrating error that blocks
-      // their workflow, fall back to summarizing the WHOLE transcript with a
-      // clear note explaining what happened. The user always gets a useful
-      // summary; they can refine the time range on a subsequent attempt if
-      // needed.
       filtered = allSegments;
       const totalSegs = allSegments.length;
       const firstStart = Math.floor(allSegments[0].start);
@@ -625,6 +803,11 @@ export async function POST(req: NextRequest) {
           "\n\n[... transcript truncated due to length ...]"
         : transcriptText;
 
+    // Fetch video metadata (title/author/thumbnail) via oEmbed. This is
+    // public data and is never bot-blocked, so we always get the title
+    // even when transcript fetching failed previously.
+    const videoMeta = await fetchVideoMeta(videoId);
+
     return await streamSummary(
       videoId,
       url || `https://www.youtube.com/watch?v=${videoId}`,
@@ -634,18 +817,47 @@ export async function POST(req: NextRequest) {
       instructions,
       truncated,
       isManual,
-      rangeNote
+      rangeNote,
+      videoMeta
     );
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Unknown error";
     const code = (err as any)?.code;
     console.error("[youtube-summary] error:", message, "code:", code);
-    // Return 403 with BOT_BLOCKED so the UI can offer the manual paste option.
+
+    // Best-effort: fetch video metadata for a richer error message — even
+    // when the transcript fetch is bot-blocked, the oEmbed endpoint usually
+    // still works, so we can at least show the video title.
+    let videoMeta: MetaCacheEntry | null = null;
+    if (parsedVideoId) {
+      try {
+        videoMeta = await fetchVideoMeta(parsedVideoId);
+      } catch {
+        // ignore — meta is best-effort
+      }
+    }
+
+    const metaPayload = videoMeta
+      ? {
+          title: videoMeta.title,
+          author: videoMeta.author,
+          thumbnailUrl: videoMeta.thumbnailUrl,
+        }
+      : null;
+
     if (code === "BOT_BLOCKED") {
-      return jsonResponse(403, { error: message, code: "BOT_BLOCKED" });
+      // Return 403 with BOT_BLOCKED so the UI can offer the manual paste
+      // option. Include the video title (if we got it) so the user can
+      // confirm this is the right video.
+      return jsonResponse(403, {
+        error: message,
+        code: "BOT_BLOCKED",
+        videoMeta: metaPayload,
+      });
     }
     return jsonResponse(500, {
       error: message || "YouTube summary failed.",
+      videoMeta: metaPayload,
     });
   }
 }

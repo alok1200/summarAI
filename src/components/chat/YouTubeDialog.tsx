@@ -153,15 +153,28 @@ export function YouTubeDialog({
           <div className="flex gap-2 rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 px-3 py-2.5 text-xs text-amber-800 dark:text-amber-200">
             <AlertCircle className="h-4 w-4 flex-shrink-0 mt-0.5" />
             <div className="flex-1">
-              <p className="font-medium mb-0.5">YouTube blocked the auto-fetch for this video.</p>
-              <p>
-                {botBlockedHint}
+              <p className="font-medium mb-0.5">
+                YouTube blocked the auto-fetch for this video.
               </p>
-              <p className="mt-1.5">
-                We&apos;ve switched to <strong>Manual mode</strong>. Open the
-                video on YouTube, click the &quot;… More&quot; button below it,
-                then <strong>Show transcript</strong>, and paste the text below.
+              <p className="mb-2">{botBlockedHint}</p>
+              <p className="mb-2">
+                We&apos;ve switched to <strong>Manual mode</strong>. Use the
+                button below to open the video on YouTube, then click the
+                &quot;… More&quot; button below the video and choose
+                <strong> Show transcript</strong>. Copy the transcript text
+                and paste it into the box below.
               </p>
+              {videoId && (
+                <a
+                  href={`https://www.youtube.com/watch?v=${videoId}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 rounded-md bg-amber-600 hover:bg-amber-700 text-white px-2.5 py-1 text-[11px] font-medium transition-colors"
+                >
+                  <Youtube className="h-3 w-3" />
+                  Open video on YouTube
+                </a>
+              )}
             </div>
           </div>
         )}

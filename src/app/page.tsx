@@ -130,22 +130,37 @@ export default function Home() {
         if (!res.ok) {
           let errMsg = `Request failed: ${res.status}`;
           let errCode: string | undefined;
+          let errMeta: { title?: string; author?: string; thumbnailUrl?: string } | undefined;
           try {
             const errBody = await res.json();
             if (errBody?.error) errMsg = errBody.error;
             errCode = errBody?.code;
+            errMeta = errBody?.videoMeta;
           } catch {
             // ignore parse error
           }
           if (errCode === "BOT_BLOCKED" && onBotBlocked) {
             onBotBlocked(errMsg);
-            // Replace the placeholder assistant message with a friendly note.
+            // Replace the placeholder assistant message with a helpful note
+            // that includes the video title (when available) so the user has
+            // confirmation that this is the right video.
+            const metaLine = errMeta?.title
+              ? `**Video:** ${errMeta.title}${errMeta.author ? ` — ${errMeta.author}` : ""}\n\n`
+              : "";
             updateMessage(
               convoId,
               assistantMsg.id,
-              "⚠️ YouTube blocked the auto-fetch for this video. " +
-                "Use the **Paste transcript manually** option in the dialog " +
-                "to paste the transcript text and get your summary."
+              `⚠️ **YouTube blocked the auto-fetch for this video.**\n\n` +
+                metaLine +
+                `YouTube is asking us to sign in to confirm we're not a bot — ` +
+                `this happens on videos with stricter bot protection (music videos, ` +
+                `TED talks, livestreams, etc.).\n\n` +
+                `**How to still get your summary:**\n` +
+                `1. Click the **"Open video on YouTube"** button in the dialog (or open the video yourself)\n` +
+                `2. Below the video, click **"… More"** → **"Show transcript"**\n` +
+                `3. Copy the transcript text from the panel that opens\n` +
+                `4. Paste it into the **"Paste transcript manually"** box in the dialog\n` +
+                `5. Click **Summarize** — you'll get your summary in seconds`
             );
           } else {
             throw new Error(errMsg);

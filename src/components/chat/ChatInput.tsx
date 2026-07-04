@@ -186,8 +186,8 @@ export function ChatInput({
             onClick={onOpenYouTube}
             disabled={isStreaming}
             className="mb-2.5 flex h-9 w-9 items-center justify-center rounded-full text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-700 hover:text-red-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-            aria-label="Summarize YouTube video"
-            title="Summarize a YouTube video"
+            aria-label="Summarize YouTube video or generate interview Q&A"
+            title="Summarize a YouTube video or generate interview Q&A"
           >
             <Youtube className="h-5 w-5" />
           </button>
@@ -233,7 +233,7 @@ export function ChatInput({
             <ImageIcon className="h-3 w-3" /> Images &amp; text files
           </span>
           <span className="inline-flex items-center gap-1">
-            <Youtube className="h-3 w-3" /> YouTube summaries with timeline
+            <Youtube className="h-3 w-3" /> YouTube summaries &amp; interview Q&amp;A
           </span>
           <span className="hidden sm:inline">·</span>
           <span className="hidden sm:inline">AI can make mistakes.</span>

@@ -249,6 +249,8 @@ export default function Home() {
     async (payload: YouTubeSubmitPayload) => {
       const startSec = parseTimeToSec(payload.startTime);
       const endSec = parseTimeToSec(payload.endTime);
+      const isInterview = payload.mode === "interview";
+      const isManual = !!payload.transcript;
 
       const meta: YouTubeMeta = {
         url: payload.url,
@@ -258,48 +260,76 @@ export default function Home() {
         instructions: payload.instructions || undefined,
       };
 
-      const isManual = !!payload.transcript;
-      const userMsg: ChatMessage = {
-        id: genId(),
-        role: "user",
-        content:
+      // Build a human-readable summary of what the user asked for.
+      let userMsgContent: string;
+      if (isInterview) {
+        const opts = payload.interviewOptions;
+        const rolePart = opts?.targetRole ? ` for a ${opts.targetRole} role` : "";
+        const countPart = opts ? `${opts.questionCount}` : "15";
+        const typePart = opts?.interviewType ? ` ${opts.interviewType}` : "";
+        const diffPart = opts?.difficulty ? ` at ${opts.difficulty} difficulty` : "";
+        userMsgContent =
+          `Generate ${countPart}${typePart} interview questions and answers${rolePart}${diffPart} from this YouTube video` +
+          (startSec !== undefined || endSec !== undefined
+            ? ` from ${payload.startTime || "0:00"} to ${
+                payload.endTime || "end"
+              }`
+            : "") +
+          (isManual ? " (using a transcript I pasted manually)" : "") +
+          (payload.instructions ? `. Instructions: ${payload.instructions}` : ".");
+      } else {
+        userMsgContent =
           `Summarize this YouTube video` +
           (startSec !== undefined || endSec !== undefined
             ? ` from ${payload.startTime || "0:00"} to ${
                 payload.endTime || "end"
               }`
             : "") +
-          (isManual
-            ? " (using a transcript I pasted manually)"
-            : "") +
-          (payload.instructions ? `. Instructions: ${payload.instructions}` : "."),
+          (isManual ? " (using a transcript I pasted manually)" : "") +
+          (payload.instructions ? `. Instructions: ${payload.instructions}` : ".");
+      }
+
+      const userMsg: ChatMessage = {
+        id: genId(),
+        role: "user",
+        content: userMsgContent,
         createdAt: Date.now(),
         youtubeMeta: meta,
       };
 
-      const apiPayload = {
+      // Build the API payload — shared fields + mode-specific fields.
+      const apiPayload: Record<string, unknown> = {
         url: payload.url,
         startTime: payload.startTime,
         endTime: payload.endTime,
         instructions: payload.instructions,
         transcript: payload.transcript,
       };
+      if (isInterview && payload.interviewOptions) {
+        apiPayload.difficulty = payload.interviewOptions.difficulty;
+        apiPayload.questionCount = payload.interviewOptions.questionCount;
+        apiPayload.interviewType = payload.interviewOptions.interviewType;
+        apiPayload.targetRole = payload.interviewOptions.targetRole;
+      }
 
-      // Show a "fetching transcript…" placeholder while we wait for the stream.
-      await runStream(
-        userMsg,
-        "/api/youtube-summary",
-        apiPayload,
-        isManual
-          ? "⏳ Summarizing your pasted transcript…"
-          : "⏳ Fetching transcript and preparing summary…",
-        (botMessage) => {
-          // Auto-reopen the dialog with the bot-blocked hint so the user can
-          // paste the transcript manually.
-          setYoutubeBotHint(botMessage);
-          setYoutubeOpen(true);
-        }
-      );
+      const endpoint = isInterview
+        ? "/api/youtube-interview"
+        : "/api/youtube-summary";
+
+      const placeholder = isManual
+        ? isInterview
+          ? "⏳ Generating interview Q&A from your pasted transcript…"
+          : "⏳ Summarizing your pasted transcript…"
+        : isInterview
+        ? "⏳ Fetching transcript and generating interview Q&A…"
+        : "⏳ Fetching transcript and preparing summary…";
+
+      await runStream(userMsg, endpoint, apiPayload, placeholder, (botMessage) => {
+        // Auto-reopen the dialog with the bot-blocked hint so the user can
+        // paste the transcript manually.
+        setYoutubeBotHint(botMessage);
+        setYoutubeOpen(true);
+      });
     },
     [runStream]
   );

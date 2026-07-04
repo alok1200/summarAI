@@ -5,13 +5,19 @@
  * improvement to the multi-strategy fetcher benefits both endpoints.
  *
  * Strategies (tried in order):
- *   1. InnerTube ANDROID player API      — bypasses JS challenges
+ *   1. InnerTube ANDROID player API      — bypasses JS challenges (20.10.38)
  *   2. Watch-page HTML scrape            — works for many public videos
  *   3. youtube-transcript npm package     — different fingerprint
  *   4. youtubei.js (Innertube WEB)       — maintained library fallback
  *
+ * All strategies reuse a warmed cookie jar (CONSENT + VISITOR_INFO1_LIVE) so
+ * YouTube treats them as a returning browser session rather than a cold bot.
+ * A 1.5s backoff is used between strategies when a 429 / "Sign in" / captcha
+ * signature is detected, giving YouTube's rate-limiter time to cool down.
+ *
  * If any strategy reports a bot-block signature, the final error is classified
- * as BOT_BLOCKED so the caller can surface a "paste transcript manually" UI.
+ * as BOT_BLOCKED so the caller can surface a graceful "try again later"
+ * message — the manual-paste fallback was removed from the UI.
  */
 
 export interface TranscriptSegment {
@@ -33,6 +39,59 @@ export interface BotBlockedError extends Error {
 const UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+
+/**
+ * Warmed cookie jar — fetched ONCE per process (and refreshed if older than
+ * 10 min). YouTube sets `CONSENT` and `VISITOR_INFO1_LIVE` cookies on the
+ * first request to youtube.com; subsequent requests that carry these cookies
+ * look like a returning browser session, which dramatically reduces the
+ * chance of getting a 429 / "Sign in to confirm you're not a bot" response.
+ */
+interface CookieJar {
+  cookieHeader: string; // e.g. "CONSENT=YES+; VISITOR_INFO1_LIVE=abc"
+  fetchedAt: number;
+}
+let warmedCookies: CookieJar | null = null;
+const COOKIE_TTL_MS = 1000 * 60 * 10; // 10 minutes
+
+async function warmCookies(): Promise<string> {
+  if (warmedCookies && Date.now() - warmedCookies.fetchedAt < COOKIE_TTL_MS) {
+    return warmedCookies.cookieHeader;
+  }
+  try {
+    const res = await fetch("https://www.youtube.com/", {
+      headers: {
+        "User-Agent": UA,
+        "Accept-Language": "en-US,en;q=0.9",
+        Accept:
+          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Upgrade-Insecure-Requests": "1",
+      },
+      redirect: "follow",
+    });
+    const setCookies = res.headers.getSetCookie?.() ?? [];
+    const pairs: string[] = [];
+    for (const sc of setCookies) {
+      const m = sc.match(/^([^=]+)=([^;]+)/);
+      if (m) pairs.push(`${m[1]}=${m[2]}`);
+    }
+    const header = pairs.length > 0 ? pairs.join("; ") : "";
+    warmedCookies = { cookieHeader: header, fetchedAt: Date.now() };
+    console.log(
+      `[youtube] Warmed ${pairs.length} cookies: ${pairs
+        .map((p) => p.split("=")[0])
+        .join(", ")}`
+    );
+    return header;
+  } catch {
+    // Cookie warming is best-effort — strategies still work without it,
+    // just with a higher block rate.
+    return "";
+  }
+}
 
 // In-memory caches
 interface CacheEntry {
@@ -354,6 +413,13 @@ export async function fetchVideoMeta(
 }
 
 // Strategy 1: InnerTube ANDROID player API
+// Uses clientVersion 20.10.38 — the most permissive YouTube ANDROID client
+// version we've tested. Newer versions (19.29.37, 19.x, 20.x with osName)
+// get rejected with HTTP 400; older versions work but get "Sign in to confirm
+// you're not a bot" more often. 20.10.38 is the sweet spot.
+//
+// The ANDROID client bypasses YouTube's JS challenge / consent page since
+// the mobile API doesn't go through the web player at all.
 async function fetchCaptionTracksViaAndroidPlayer(
   videoId: string
 ): Promise<CaptionTrack[] | null> {
@@ -408,10 +474,11 @@ async function fetchCaptionTracksViaAndroidPlayer(
   return Array.isArray(tracks) ? (tracks as CaptionTrack[]) : null;
 }
 
-// Strategy 2: scrape the watch page HTML
+// Strategy 2: scrape the watch page HTML (with warmed cookies + browser headers)
 async function fetchCaptionTracksViaWatchPage(
   videoId: string
 ): Promise<CaptionTrack[] | null> {
+  const cookieHeader = await warmCookies();
   const watchUrl = `https://www.youtube.com/watch?v=${videoId}`;
   const res = await fetch(watchUrl, {
     headers: {
@@ -419,6 +486,11 @@ async function fetchCaptionTracksViaWatchPage(
       "Accept-Language": "en-US,en;q=0.9",
       Accept:
         "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+      "Sec-Fetch-Dest": "document",
+      "Sec-Fetch-Mode": "navigate",
+      "Sec-Fetch-Site": "none",
+      "Upgrade-Insecure-Requests": "1",
+      ...(cookieHeader ? { Cookie: cookieHeader } : {}),
     },
   });
 
@@ -591,9 +663,16 @@ async function fetchAndParseCaptionTracks(
 ): Promise<TranscriptSegment[]> {
   const track = pickBestTrack(tracks);
   const trackUrl = normalizeTrackUrl(track.baseUrl);
+  const cookieHeader = await warmCookies();
 
   const captionRes = await fetch(trackUrl, {
-    headers: { "User-Agent": UA, "Accept-Language": "en-US,en;q=0.9" },
+    headers: {
+      "User-Agent": UA,
+      "Accept-Language": "en-US,en;q=0.9",
+      Origin: "https://www.youtube.com",
+      Referer: "https://www.youtube.com/",
+      ...(cookieHeader ? { Cookie: cookieHeader } : {}),
+    },
   });
   if (!captionRes.ok) {
     throw new Error(`Failed to fetch captions (HTTP ${captionRes.status}).`);
@@ -662,6 +741,15 @@ export async function fetchTranscriptWithRetry(
     },
   ];
 
+  // Returns true if the error message looks like YouTube bot-protection /
+  // rate-limiting. Used both to flag the final error as BOT_BLOCKED and to
+  // decide whether to use a longer backoff before the next strategy.
+  function isBotBlockMessage(msg: string): boolean {
+    return /sign in|bot|consent|429|rate.?limit|captcha|too many requests|unusual traffic/i.test(
+      msg
+    );
+  }
+
   let lastError: Error | null = null;
   let botBlockedSeen = false;
   let segments: TranscriptSegment[] | null = null;
@@ -682,13 +770,18 @@ export async function fetchTranscriptWithRetry(
     } catch (e) {
       const msg = (e as Error).message;
       console.log(`[youtube] ✗ ${strategy.name} failed: ${msg}`);
-      if (/sign in|bot|consent|429|rate.?limit|captcha|too many requests/i.test(msg)) {
+      const blocked = isBotBlockMessage(msg);
+      if (blocked) {
         botBlockedSeen = true;
         lastError = e as Error;
       } else if (!botBlockedSeen) {
         lastError = e as Error;
       }
-      await new Promise((r) => setTimeout(r, 400));
+      // 429 = rate limit: give YouTube time to cool down before next attempt.
+      // Bot-block / "Sign in" usually clears with a 1.5s pause. Other errors
+      // (e.g. caption format unsupported) don't need any delay.
+      const backoff = blocked ? 1500 : 400;
+      await new Promise((r) => setTimeout(r, backoff));
     }
   }
 
@@ -709,23 +802,29 @@ export async function fetchTranscriptWithRetry(
       } catch (e) {
         const msg = (e as Error).message;
         console.log(`[youtube] ✗ ${strategy.name} failed: ${msg}`);
-        if (/sign in|bot|consent|429|rate.?limit|captcha|too many requests/i.test(msg)) {
+        const blocked = isBotBlockMessage(msg);
+        if (blocked) {
           botBlockedSeen = true;
           lastError = e as Error;
         } else if (!botBlockedSeen) {
           lastError = e as Error;
         }
-        await new Promise((r) => setTimeout(r, 400));
+        const backoff = blocked ? 1500 : 400;
+        await new Promise((r) => setTimeout(r, backoff));
       }
     }
   }
 
   if (!segments || segments.length === 0) {
     if (botBlockedSeen) {
+      // Note: the manual-paste fallback was removed from the UI. This message
+      // is surfaced to the user as a graceful "try again later" — no broken
+      // instructions, no dead-end UI references. The page.tsx handler replaces
+      // this text with its own friendlier copy before showing the user.
       const friendlyMessage =
-        "YouTube is asking us to sign in to confirm we're not a bot for this video. " +
-        "This happens on videos with stricter bot protection (e.g. some TED talks, music videos, livestreams). " +
-        "You can still get your result by clicking 'Paste transcript manually' and pasting the transcript text from YouTube's 'Show transcript' panel.";
+        "YouTube is rate-limiting this server's IP and asking us to sign in to " +
+        "confirm we're not a bot. This is temporary and usually clears within a " +
+        "few minutes. Please try again, or try a different video.";
       const err = new Error(friendlyMessage) as BotBlockedError;
       err.code = "BOT_BLOCKED";
       throw err;
@@ -733,7 +832,7 @@ export async function fetchTranscriptWithRetry(
     const msg = lastError?.message || "";
     throw new Error(
       "This video has no captions or transcript available, or YouTube blocked the request. " +
-        "Try a different video with English captions enabled, or use the 'Paste transcript manually' option." +
+        "Try a different video with English captions enabled, or try again in a few minutes." +
         (msg ? ` (Details: ${msg})` : "")
     );
   }

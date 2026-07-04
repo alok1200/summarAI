@@ -474,3 +474,51 @@ Stage Summary:
 - Optional instructions still work: type "summarize this focusing on the React parts: <URL>" → instructions field is set.
 - The YouTube button in the chat input is gone (the chip is enough for discoverability, and the placeholder mentions YouTube).
 - File size: page.tsx went from 969 lines → 653 lines (≈ -33% lighter). ChatInput.tsx went from 301 lines → 285 lines.
+
+---
+Task ID: 14
+Agent: main
+Task: Fix the YouTube bot-blocked error flow — the user-facing message still referenced a "Paste transcript manually" UI that was already removed in the previous task, and the underlying fetcher needed to be more robust against YouTube's rate limiting.
+
+Work Log:
+- Read /src/lib/youtube-transcript.ts — the 4-strategy transcript fetcher (ANDROID InnerTube / watch-page scrape / youtube-transcript lib / youtubei.js)
+- Read /src/app/page.tsx runStream — found the bot-blocked handler at line ~309 that wrote the misleading "paste it back here as a normal chat message starting with 'summarize this transcript:'" message (this hack never worked because /api/chat doesn't handle that prefix)
+- Inspected /home/z/my-project/dev.log — saw that for video CCV5fKgmdQc all 4 strategies were failing:
+  · ANDROID player API → "Sign in to confirm you're not a bot"
+  · Watch page scrape → HTTP 429 (rate limit)
+  · youtube-transcript library → "too many requests from this IP, captcha required"
+  · youtubei.js → HTTP 400 on /get_transcript endpoint
+- Wrote a probe script (test-clients.mjs) to test different InnerTube client variants against a known-good video. Findings:
+  · WEB client → "Video unavailable / The page needs to be reloaded" — requires visitorData session token we don't have
+  · ANDROID 20.10.38 (the OLD version we already had) → ✓ returns 6 caption tracks
+  · ANDROID 19.29.37 (the "improvement" I tried first) → HTTP 400 (rejected)
+  · iOS 19.45.4 with deviceMake/deviceModel/osName/osVersion → HTTP 400 (rejected)
+- Concluded: WEB and iOS strategies don't work without complex session setup; the existing ANDROID 20.10.38 is already the sweet spot. Kept the simpler approach.
+
+Changes made to /src/lib/youtube-transcript.ts:
+- Added `warmCookies()` — fetches youtube.com/ once per 10 min, captures the Set-Cookie header (CONSENT, VISITOR_INFO1_LIVE, __Secure-ROLLOUT_TOKEN, etc.), and reuses it as the `Cookie` header on subsequent YouTube requests. This makes the watch-page scrape and the timedtext fetch look like a returning browser session.
+- Watch page scrape now sends full browser headers (Sec-Fetch-Dest/Mode/Site, Upgrade-Insecure-Requests, Cookie) — closer to a real browser fingerprint.
+- fetchAndParseCaptionTracks (the timedtext fetch) now also sends Origin/Referer/Cookie headers — previously it was a bare UA-only request that was easy to fingerprint.
+- Backoff between strategies is now 1500ms (up from 400ms) when a 429 / "Sign in" / "captcha" signature is detected. Gives YouTube's rate-limiter time to cool down before the next attempt. Regular non-block errors still use 400ms.
+- isBotBlockMessage() now also matches "unusual traffic" in addition to the existing patterns.
+- Reverted an experimental change to the ANDROID client body — kept clientVersion 20.10.38 (the only version that works reliably in our tests).
+- Removed experimental WEB and iOS InnerTube strategies that I added and then reverted (they returned HTTP 400 / "Video unavailable" and weren't usable without much more complex session setup).
+- Updated the BOT_BLOCKED error message in the library — used to say "use the 'Paste transcript manually' option" (which no longer exists), now says "YouTube is rate-limiting this server's IP... usually clears within a few minutes. Please try again, or try a different video."
+
+Changes made to /src/app/page.tsx:
+- Rewrote the bot-blocked user-facing message in runStream (line ~309). Old message told the user to (1) open video on YouTube, (2) click "Show transcript", (3) copy the transcript, (4) "paste it back here as a normal chat message starting with 'summarize this transcript:'". That last step was a dead end — /api/chat has no handler for that prefix, so the user would just get a confused chat reply, not a summary. New message is honest: explains YouTube is rate-limiting us, suggests trying again in a few minutes or trying a different video, points to the timestamp badge to open the video on YouTube while waiting.
+- Updated the stale comment in the YouTube auto-route section that referenced "open the video + paste transcript" message — now correctly describes the new graceful fallback.
+
+Verification:
+- bun scripts/test-strategies.mjs dQw4w9WgXcQ (Rick Astley) → ✓ ANDROID strategy succeeded, got 61 segments. Cookie warming confirmed (6 cookies captured including VISITOR_INFO1_LIVE).
+- bun scripts/test-strategies.mjs CCV5fKgmdQc (Piyush Garg's bot-blocked video) → ✗ still BOT_BLOCKED. This video is genuinely rate-limited at the IP level — no client-side fix can bypass that. The user now gets the honest "try again later" message instead of broken instructions.
+- npx tsc --noEmit → clean, no type errors.
+- Dev server hot-reloaded all changes, GET / returns 200 in ~500ms.
+- Cleaned up the probe scripts (test-strategies.mjs, test-clients.mjs) — they were one-off verification tools, not part of the codebase.
+
+Stage Summary:
+- Bot-blocked UX is now honest and self-consistent: graceful "try again later" message, no broken references to removed UI.
+- Cookie warming + 1.5s backoff + browser-fingerprint headers make the fetcher more robust against YouTube's IP rate-limiting for the cases that CAN be solved client-side.
+- The experimental WEB/iOS strategies I initially added were reverted after testing showed they returned HTTP 400 / "Video unavailable" — keeping them would have been a regression.
+- For genuinely IP-rate-limited videos like CCV5fKgmdQc, no client-side fix exists. The realistic options would be (a) deploy behind a residential proxy or rotating IP pool, or (b) wait for the rate limit to clear. The new error message communicates this honestly to the user instead of giving them dead-end instructions.
+- Files changed: /src/lib/youtube-transcript.ts, /src/app/page.tsx

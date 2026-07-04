@@ -308,26 +308,27 @@ export default function Home() {
           }
           if (errCode === "BOT_BLOCKED" && onBotBlocked) {
             onBotBlocked(errMsg);
-            // Replace the placeholder assistant message with a helpful note
-            // that includes the video title (when available) so the user has
-            // confirmation that this is the right video.
+            // Replace the placeholder assistant message with a graceful,
+            // honest "try again later" note. The manual-paste fallback was
+            // removed from the UI — we no longer ask the user to paste the
+            // transcript themselves. Instead we explain what happened and
+            // suggest the two paths that actually work: retry, or try a
+            // different video.
             const metaLine = errMeta?.title
               ? `**Video:** ${errMeta.title}${errMeta.author ? ` — ${errMeta.author}` : ""}\n\n`
               : "";
             updateMessage(
               convoId,
               assistantMsg.id,
-              `⚠️ **YouTube blocked the auto-fetch for this video.**\n\n` +
+              `⚠️ **We couldn't auto-fetch this video's transcript.**\n\n` +
                 metaLine +
-                `YouTube is asking us to sign in to confirm we're not a bot — ` +
-                `this happens on videos with stricter bot protection (music videos, ` +
-                `TED talks, livestreams, etc.).\n\n` +
-                `**How to still get your summary:**\n` +
-                `1. Open the video on YouTube (click the timestamp badge above this message).\n` +
-                `2. Below the video, click **"… More"** → **"Show transcript"**.\n` +
-                `3. Copy the transcript text from the panel that opens.\n` +
-                `4. Paste it back here as a normal chat message starting with "summarize this transcript:" ` +
-                `and I'll summarize it for you in seconds.`
+                `YouTube is rate-limiting this server right now and asking us to confirm ` +
+                `we're not a bot. This is temporary and usually clears within a few minutes.\n\n` +
+                `**What you can do:**\n` +
+                `- **Try again in a few minutes** — most blocks clear on their own.\n` +
+                `- **Try a different video** — blocks are IP- and video-specific, so another ` +
+                `video usually works fine.\n\n` +
+                `You can click the timestamp badge above to open the video on YouTube while you wait.`
             );
           } else {
             throw new Error(errMsg);
@@ -429,11 +430,11 @@ export default function Home() {
           "/api/youtube-summary",
           apiPayload,
           "⏳ Fetching transcript and preparing summary…",
-          // Bot-blocked callback: we no longer reopen a panel, but we still
-          // need to pass SOMETHING so the runStream knows to write the
-          // friendly "open the video + paste transcript" message. A no-op
-          // is fine — runStream writes the message regardless of what the
-          // callback does.
+          // Bot-blocked callback. The manual-paste panel was removed, so
+          // there's no UI to reopen on a bot-block — runStream itself writes
+          // the graceful "try again later" message into the assistant bubble.
+          // We still pass a no-op here so runStream knows to take that branch
+          // (it gates the BOT_BLOCKED message on `onBotBlocked` being truthy).
           () => {}
         );
         return;

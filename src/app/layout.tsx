@@ -3,6 +3,7 @@ import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { Toaster } from "@/components/ui/toaster";
 import { ThemeProvider } from "next-themes";
+import Script from "next/script";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -29,8 +30,7 @@ export const metadata: Metadata = {
 // CSS variables from the DOM so the server-rendered HTML matches the client
 // HTML, preventing the "A tree hydrated but some attributes didn't match"
 // hydration error overlay.
-const darkReaderGuard = `
-(function () {
+const darkReaderGuard = `(function () {
   try {
     if (typeof document === "undefined") return;
     var ready = function () {
@@ -61,8 +61,7 @@ const darkReaderGuard = `
     setTimeout(ready, 0);
     setTimeout(ready, 250);
   } catch (e) { /* no-op */ }
-})();
-`;
+})();`;
 
 export default function RootLayout({
   children,
@@ -71,13 +70,15 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" suppressHydrationWarning>
-      <head>
-        <script dangerouslySetInnerHTML={{ __html: darkReaderGuard }} />
-      </head>
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased bg-background text-foreground`}
         suppressHydrationWarning
       >
+        <Script
+          id="dark-reader-guard"
+          strategy="beforeInteractive"
+          dangerouslySetInnerHTML={{ __html: darkReaderGuard }}
+        />
         <ThemeProvider
           attribute="class"
           defaultTheme="dark"

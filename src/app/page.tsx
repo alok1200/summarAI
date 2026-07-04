@@ -57,7 +57,8 @@ export default function Home() {
     if (authLoading) {
       fetchMe();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // Intentionally empty deps — we only want this to run on the very first
+    // mount, not on every authLoading/fetchMe change.
   }, []);
 
   useEffect(() => {

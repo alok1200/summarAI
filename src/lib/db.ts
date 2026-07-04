@@ -7,7 +7,9 @@ const globalForPrisma = globalThis as unknown as {
 export const db =
   globalForPrisma.prisma ??
   new PrismaClient({
-    log: ['query'],
+    // Silence query logging — it was spamming dev.log and making it hard
+    // to spot real errors. Enable ['error', 'warn'] in local dev if needed.
+    log: ['error', 'warn'],
   })
 
 if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = db

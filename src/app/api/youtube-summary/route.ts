@@ -1,6 +1,5 @@
 import { NextRequest } from "next/server";
 import ZAI from "z-ai-web-dev-sdk";
-import { Innertube } from "youtubei.js";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -15,7 +14,7 @@ const UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
-// In-memory cache: videoId+range -> { segments, fetchedAt }
+// In-memory cache: videoId -> { segments, fetchedAt }
 // Avoids re-fetching transcript when the user retries a failed summary.
 interface CacheEntry {
   segments: TranscriptSegment[];
@@ -137,65 +136,7 @@ async function fetchCaptionTracksViaAndroidPlayer(
 }
 
 /**
- * Strategy 2 (fallback): use youtubei.js (Innertube) WEB client with a proper
- * session and visitor data. The library manages PoTokens and visitor data
- * automatically. For some videos that block the ANDROID client, this works
- * because YouTube treats the WEB client session more like a real browser.
- */
-async function fetchTranscriptViaInnertubeWeb(
-  videoId: string
-): Promise<TranscriptSegment[] | null> {
-  const yt = await Innertube.create({
-    location: "US",
-    lang: "en",
-    retrieve_player: false,
-  });
-
-  // Fetch video info via the WEB client. This establishes a proper session
-  // with visitor data + cookies that YouTube accepts for most videos.
-  const info = await yt.getInfo(videoId, { client: "WEB" });
-
-  // Try the proper transcript API (uses engagement-panel continuation).
-  try {
-    const transcriptInfo = await info.getTranscript();
-    const segments = transcriptInfo?.transcript?.content?.body?.initial_segments;
-    if (segments && segments.length > 0) {
-      const out: TranscriptSegment[] = [];
-      for (const seg of segments as any[]) {
-        const startMs = Number(seg.start_ms ?? 0);
-        const endMs = Number(seg.end_ms ?? startMs);
-        const text = (seg.snippet?.text ?? "").toString().trim();
-        if (text) {
-          out.push({
-            start: startMs / 1000,
-            dur: Math.max(0, (endMs - startMs) / 1000),
-            text,
-          });
-        }
-      }
-      if (out.length > 0) return out;
-    }
-  } catch (e) {
-    console.log(
-      "[youtube-summary] Innertube getTranscript failed:",
-      (e as Error).message
-    );
-  }
-
-  // Fallback: pull caption track URLs from the player response and fetch them
-  // directly. This still benefits from the WEB session's cookies/visitor data.
-  const playerData: any = (info as any)?.page?.[0];
-  const tracks =
-    playerData?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-  if (Array.isArray(tracks) && tracks.length > 0) {
-    return fetchAndParseCaptionTracks(tracks as CaptionTrack[]);
-  }
-
-  return null;
-}
-
-/**
- * Strategy 3 (last resort): scrape the watch page HTML. Works for many public
+ * Strategy 2 (fallback): scrape the watch page HTML. Works for many public
  * videos but is the most likely to hit "Sign in to confirm you're not a bot".
  */
 async function fetchCaptionTracksViaWatchPage(
@@ -364,28 +305,18 @@ async function fetchTranscriptWithRetry(
 
   // Try each strategy in order.
   // 1. ANDROID player API (fastest, often works for non-protected videos)
-  // 2. Innertube WEB client (uses proper session cookies + visitor data — best
-  //    chance for videos where ANDROID gets the bot-check)
-  // 3. Watch page scrape (last resort; most likely to hit 429)
+  // 2. Watch page scrape (fallback; more likely to hit 429)
   const strategies: {
     name: string;
-    fn: (id: string) => Promise<TranscriptSegment[] | null> | Promise<CaptionTrack[] | null>;
-    kind: "segments" | "tracks";
+    fn: (id: string) => Promise<CaptionTrack[] | null>;
   }[] = [
     {
       name: "ANDROID player API",
       fn: fetchCaptionTracksViaAndroidPlayer,
-      kind: "tracks",
-    },
-    {
-      name: "Innertube WEB client",
-      fn: fetchTranscriptViaInnertubeWeb,
-      kind: "segments",
     },
     {
       name: "Watch page scrape",
       fn: fetchCaptionTracksViaWatchPage,
-      kind: "tracks",
     },
   ];
 
@@ -395,39 +326,18 @@ async function fetchTranscriptWithRetry(
   for (const strategy of strategies) {
     try {
       console.log(`[youtube-summary] Trying ${strategy.name} for ${videoId}`);
-      const result = await strategy.fn(videoId);
-      if (!result) {
+      const tracks = await strategy.fn(videoId);
+      if (!tracks || tracks.length === 0) {
         console.log(
-          `[youtube-summary] ✗ ${strategy.name} returned no data`
+          `[youtube-summary] ✗ ${strategy.name} returned no tracks`
         );
         continue;
       }
-      if (strategy.kind === "tracks") {
-        const tracks = result as CaptionTrack[];
-        if (tracks.length === 0) {
-          console.log(
-            `[youtube-summary] ✗ ${strategy.name} returned 0 tracks`
-          );
-          continue;
-        }
-        console.log(
-          `[youtube-summary] ✓ ${strategy.name} returned ${tracks.length} tracks`
-        );
-        segments = await fetchAndParseCaptionTracks(tracks);
-      } else {
-        const segs = result as TranscriptSegment[];
-        if (segs.length === 0) {
-          console.log(
-            `[youtube-summary] ✗ ${strategy.name} returned 0 segments`
-          );
-          continue;
-        }
-        console.log(
-          `[youtube-summary] ✓ ${strategy.name} returned ${segs.length} segments`
-        );
-        segments = segs;
-      }
-      if (segments && segments.length > 0) break;
+      console.log(
+        `[youtube-summary] ✓ ${strategy.name} returned ${tracks.length} tracks`
+      );
+      segments = await fetchAndParseCaptionTracks(tracks);
+      if (segments.length > 0) break;
     } catch (e) {
       const msg = (e as Error).message;
       console.log(`[youtube-summary] ✗ ${strategy.name} failed: ${msg}`);

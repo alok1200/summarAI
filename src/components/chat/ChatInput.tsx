@@ -212,9 +212,10 @@ export function ChatInput({
 
         <div
           className={cn(
-            "relative flex items-end gap-1 rounded-3xl border bg-white dark:bg-zinc-800 shadow-sm transition-colors",
+            "relative flex items-end gap-1 rounded-3xl border bg-white dark:bg-zinc-800 shadow-sm transition-all",
             "border-zinc-200 dark:border-zinc-700",
-            "focus-within:border-zinc-400 dark:focus-within:border-zinc-500"
+            "focus-within:border-emerald-400 dark:focus-within:border-emerald-500",
+            "focus-within:shadow-md focus-within:ring-2 focus-within:ring-emerald-500/10"
           )}
         >
           {/* Hidden file input */}
@@ -231,7 +232,7 @@ export function ChatInput({
           <button
             onClick={() => fileInputRef.current?.click()}
             disabled={pending.length >= MAX_FILES}
-            className="ml-2 mb-2.5 flex h-9 w-9 items-center justify-center rounded-full text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            className="ml-2 mb-2.5 flex h-9 w-9 items-center justify-center rounded-full text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200 disabled:opacity-40 disabled:cursor-not-allowed transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/40"
             aria-label="Attach files"
             title="Attach files"
           >
@@ -252,7 +253,7 @@ export function ChatInput({
             {isStreaming ? (
               <button
                 onClick={onStop}
-                className="flex h-9 w-9 items-center justify-center rounded-full bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 hover:opacity-80 transition-opacity"
+                className="flex h-9 w-9 items-center justify-center rounded-full bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 hover:opacity-80 active:scale-95 transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/40"
                 aria-label="Stop"
               >
                 <Square className="h-4 w-4 fill-current" />
@@ -262,9 +263,9 @@ export function ChatInput({
                 onClick={handleSubmit}
                 disabled={!hasInput}
                 className={cn(
-                  "flex h-9 w-9 items-center justify-center rounded-full transition-colors",
+                  "flex h-9 w-9 items-center justify-center rounded-full transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/40",
                   hasInput
-                    ? "bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 hover:opacity-80"
+                    ? "bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 hover:opacity-80 active:scale-95"
                     : "bg-zinc-200 dark:bg-zinc-700 text-zinc-400 dark:text-zinc-500 cursor-not-allowed"
                 )}
                 aria-label="Send"

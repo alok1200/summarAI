@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useState, useMemo } from "react";
+import { memo, useState, useMemo, useEffect } from "react";
 import ReactMarkdown from "react-markdown";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
@@ -142,6 +142,46 @@ function StreamingProgressBar({ info }: { info: ProgressInfo }) {
           style={{ width: `${pct}%` }}
         />
       </div>
+    </div>
+  );
+}
+
+/**
+ * "Thinking…" indicator shown while we're waiting for the FIRST chunk of an
+ * assistant response. Once real content arrives, this disappears.
+ *
+ * This addresses the UX gap where short-video summaries and normal chat
+ * responses had no progress indicator — the user just saw a blank bubble
+ * with a tiny blinking cursor for 5-30 seconds while the LLM warmed up.
+ *
+ * Shows:
+ *   - An animated 3-dot "typing" indicator
+ *   - An elapsed-time counter ("3s", "12s", …) so the user knows it's
+ *     actually working, not stuck
+ *
+ * The map-reduce path has its own StreamingProgressBar above; this is only
+ * shown when there's NO progress info (i.e. short videos + regular chat).
+ */
+function StreamingWaitIndicator() {
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    const start = Date.now();
+    const id = setInterval(() => {
+      setElapsed(Math.floor((Date.now() - start) / 1000));
+    }, 500);
+    return () => clearInterval(id);
+  }, []);
+
+  return (
+    <div className="my-2 flex items-center gap-3 text-sm text-zinc-500 dark:text-zinc-400">
+      <div className="flex items-center gap-1">
+        <span className="inline-block h-1.5 w-1.5 animate-bounce rounded-full bg-zinc-400 [animation-delay:-0.3s] dark:bg-zinc-500" />
+        <span className="inline-block h-1.5 w-1.5 animate-bounce rounded-full bg-zinc-400 [animation-delay:-0.15s] dark:bg-zinc-500" />
+        <span className="inline-block h-1.5 w-1.5 animate-bounce rounded-full bg-zinc-400 dark:bg-zinc-500" />
+      </div>
+      <span className="text-xs tabular-nums">
+        {elapsed === 0 ? "Thinking…" : `${elapsed}s`}
+      </span>
     </div>
   );
 }
@@ -434,7 +474,11 @@ function MessageBubbleImpl({
         // Both sides transparent at the row level — the bubble itself carries
         // the background. This avoids the "full-width band" look that made
         // the left/right split invisible before.
-        "bg-transparent"
+        "bg-transparent",
+        // Subtle entrance animation. Picks left vs. right based on the role
+        // so user messages slide in from the left and AI responses from the
+        // right. Disabled automatically via prefers-reduced-motion.
+        isUser ? "msg-enter-user" : "msg-enter-assistant"
       )}
     >
       <div
@@ -500,6 +544,15 @@ function MessageBubbleImpl({
             <div className="prose prose-sm dark:prose-invert max-w-none w-full text-[15px] leading-7 text-zinc-800 dark:text-zinc-100 [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
               {/* Visual progress bar at the top of a streaming map-reduce response */}
               {progressInfo && <StreamingProgressBar info={progressInfo} />}
+
+              {/* "Thinking…" indicator shown ONLY while we're streaming AND
+                  no real content has arrived yet AND there's no map-reduce
+                  progress bar (which has its own visual). Once the first
+                  chunk lands this disappears, replaced by the markdown
+                  content + blinking cursor below. */}
+              {isStreaming &&
+                !progressInfo &&
+                !processedContent.trim() && <StreamingWaitIndicator />}
 
               <ReactMarkdown
                 components={{

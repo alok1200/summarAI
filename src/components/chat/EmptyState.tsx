@@ -61,7 +61,7 @@ export function EmptyState({ onPickPrompt }: EmptyStateProps) {
             <button
               key={s.title}
               onClick={() => onPickPrompt(s.prompt)}
-              className="group flex items-start gap-3 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 text-left transition-all hover:border-zinc-300 dark:hover:border-zinc-700 hover:shadow-sm"
+              className="group flex items-start gap-3 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 text-left transition-all hover:border-zinc-300 dark:hover:border-zinc-700 hover:shadow-md hover:-translate-y-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/40"
             >
               <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300 group-hover:bg-emerald-50 dark:group-hover:bg-emerald-950 group-hover:text-emerald-600 dark:group-hover:text-emerald-400 transition-colors">
                 <s.icon className="h-4 w-4" />

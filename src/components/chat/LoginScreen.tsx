@@ -133,7 +133,7 @@ export function LoginScreen() {
         </div>
 
         {/* Card */}
-        <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-6 shadow-sm">
+        <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-6 shadow-sm transition-shadow hover:shadow-md">
           {/* Mode tabs */}
           <div className="mb-5 flex rounded-lg bg-zinc-100 dark:bg-zinc-800 p-1">
             <button

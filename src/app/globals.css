@@ -206,3 +206,62 @@
   border: 1px solid rgba(120, 120, 120, 0.3);
   padding: 6px 10px;
 }
+
+/* ─────────────────────────────────────────────────────────────────
+   Chat message animations
+   ─────────────────────────────────────────────────────────────────
+   Subtle entrance animation for newly-added message bubbles. Designed
+   to feel like the message "slides in" from its respective side
+   (user = left, AI = right) without being distracting.
+
+   The `@media (prefers-reduced-motion: reduce)` rule disables the
+   animation for users who've asked their OS to minimize motion.
+*/
+@keyframes msg-enter-left {
+  from {
+    opacity: 0;
+    transform: translateX(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+@keyframes msg-enter-right {
+  from {
+    opacity: 0;
+    transform: translateX(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+.msg-enter-user {
+  animation: msg-enter-left 0.22s ease-out;
+}
+.msg-enter-assistant {
+  animation: msg-enter-right 0.22s ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .msg-enter-user,
+  .msg-enter-assistant {
+    animation: none;
+  }
+}
+
+/* ─────────────────────────────────────────────────────────────────
+   Scroll-to-bottom button fade
+   ─────────────────────────────────────────────────────────────────
+   Used by the scroll-to-bottom button in page.tsx — fades in when
+   the user has scrolled up, fades out when they're at the bottom.
+*/
+.scroll-bottom-btn {
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+.scroll-bottom-btn[data-hidden="true"] {
+  opacity: 0;
+  transform: translateY(8px);
+  pointer-events: none;
+}
+

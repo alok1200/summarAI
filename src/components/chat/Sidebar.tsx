@@ -170,7 +170,7 @@ export function Sidebar({ onClose }: SidebarProps) {
       <div className="px-3 pb-2">
         <button
           onClick={handleNew}
-          className="flex w-full items-center gap-3 rounded-lg border border-zinc-200 dark:border-zinc-800 px-3 py-2.5 text-sm font-medium text-zinc-800 dark:text-zinc-200 hover:bg-white dark:hover:bg-zinc-900 transition-colors"
+          className="flex w-full items-center gap-3 rounded-lg border border-zinc-200 dark:border-zinc-800 px-3 py-2.5 text-sm font-medium text-zinc-800 dark:text-zinc-200 hover:bg-white dark:hover:bg-zinc-900 hover:border-zinc-300 dark:hover:border-zinc-700 hover:shadow-sm transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/40"
         >
           <Plus className="h-4 w-4" />
           New chat

@@ -25,6 +25,45 @@ export const metadata: Metadata = {
   },
 };
 
+// Runs BEFORE React hydrates. Strips Dark Reader's injected attributes and
+// CSS variables from the DOM so the server-rendered HTML matches the client
+// HTML, preventing the "A tree hydrated but some attributes didn't match"
+// hydration error overlay.
+const darkReaderGuard = `
+(function () {
+  try {
+    if (typeof document === "undefined") return;
+    var ready = function () {
+      // 1) Remove Dark Reader's injected <style> blocks
+      document
+        .querySelectorAll("style[data-darkreader-inline-stroke], style[data-darkreader-inline-fill], style[data-darkreader-inline-color], style[data-darkreader-bgcolor], style[data-darkreader-proxy]")
+        .forEach(function (el) { el.remove(); });
+      // 2) Strip Dark Reader's data-* attributes and CSS custom properties from every element
+      document.querySelectorAll("*").forEach(function (el) {
+        var toRemove = [];
+        for (var i = 0; i < el.attributes.length; i++) {
+          var name = el.attributes[i].name;
+          if (name.indexOf("data-darkreader") === 0) toRemove.push(name);
+        }
+        toRemove.forEach(function (n) { el.removeAttribute(n); });
+        if (el.style && el.style.cssText) {
+          var cleaned = el.style.cssText.replace(/--darkreader[^:;]+:[^;]+;?/g, "").trim();
+          if (cleaned !== el.style.cssText.trim()) el.style.cssText = cleaned;
+        }
+      });
+    };
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", ready, { once: true });
+    } else {
+      ready();
+    }
+    // Re-run after a tick — Dark Reader is async and keeps re-injecting.
+    setTimeout(ready, 0);
+    setTimeout(ready, 250);
+  } catch (e) { /* no-op */ }
+})();
+`;
+
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -32,6 +71,9 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: darkReaderGuard }} />
+      </head>
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased bg-background text-foreground`}
         suppressHydrationWarning

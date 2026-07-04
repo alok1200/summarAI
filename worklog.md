@@ -522,3 +522,23 @@ Stage Summary:
 - The experimental WEB/iOS strategies I initially added were reverted after testing showed they returned HTTP 400 / "Video unavailable" — keeping them would have been a regression.
 - For genuinely IP-rate-limited videos like CCV5fKgmdQc, no client-side fix exists. The realistic options would be (a) deploy behind a residential proxy or rotating IP pool, or (b) wait for the rate limit to clear. The new error message communicates this honestly to the user instead of giving them dead-end instructions.
 - Files changed: /src/lib/youtube-transcript.ts, /src/app/page.tsx
+
+---
+Task ID: 15
+Agent: main
+Task: Make chat layout a clear left/right split — user questions on the LEFT, AI responses on the RIGHT (WhatsApp/iMessage style).
+
+Work Log:
+- Read /src/components/chat/MessageBubble.tsx — found that the layout technically already had user-left / AI-right via `justify-start` vs `justify-end flex-row-reverse`, BUT the AI bubble had `w-full sm:flex-1` which made it grow to fill the entire row. Combined with a subtle `bg-zinc-50/60` background tint on the AI row, the AI messages looked like full-width horizontal bands instead of right-side bubbles — the right-alignment was invisible.
+- Edited MessageBubble.tsx:
+  · Removed the `bg-zinc-50/60 dark:bg-zinc-900/30` background tint from the AI row — both rows are now transparent at the row level, only the bubble itself carries background color.
+  · Removed `sm:flex-1` from the AI bubble class list.
+  · Capped BOTH user and AI bubbles at `max-w-[75%]` (was previously `max-w-[calc(100%-3rem)] sm:max-w-[85%]` for user, `w-full sm:flex-1` for AI). Now they have the same max width, so the left/right split is visually obvious.
+  · Kept the avatars on the appropriate sides (user avatar on far left, AI avatar on far right via `flex-row-reverse`).
+  · Kept the bubble colors (emerald-600 for user, white/zinc-800 for AI) and rounded corners (rounded-tl-sm for user, rounded-tr-sm for AI) — these naturally indicate which side the bubble belongs to.
+- Verified dev server hot-reloaded cleanly (compiled in 276ms, GET / returns 200 in ~600ms).
+
+Stage Summary:
+- Chat now has a clear WhatsApp/iMessage-style left/right split: user questions appear as emerald bubbles on the LEFT (with avatar on far left), AI responses appear as white/zinc bubbles on the RIGHT (with avatar on far right).
+- Both bubbles cap at 75% of the row width so there's always visible whitespace on the opposite side, making the alignment obvious at a glance.
+- Files changed: /src/components/chat/MessageBubble.tsx

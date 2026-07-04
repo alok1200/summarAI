@@ -431,14 +431,17 @@ function MessageBubbleImpl({
     <div
       className={cn(
         "group relative w-full px-4 py-3 md:px-8",
-        isUser
-          ? "bg-transparent"
-          : "bg-zinc-50/60 dark:bg-zinc-900/30"
+        // Both sides transparent at the row level — the bubble itself carries
+        // the background. This avoids the "full-width band" look that made
+        // the left/right split invisible before.
+        "bg-transparent"
       )}
     >
       <div
         className={cn(
           "mx-auto flex max-w-3xl gap-3 items-start",
+          // User: avatar+bubble packed to the LEFT.
+          // AI:   bubble+avatar packed to the RIGHT (row reversed).
           isUser ? "justify-start" : "justify-end flex-row-reverse"
         )}
       >
@@ -458,12 +461,14 @@ function MessageBubbleImpl({
         <div
           className={cn(
             "flex min-w-0 flex-col",
-            // Cap width so bubbles don't span the full row on desktop.
-            // On mobile, allow up to ~85% of the row so long content can still breathe.
-            "max-w-[calc(100%-3rem)] sm:max-w-[85%]",
+            // Cap BOTH user and AI bubbles at 75% of the row so the
+            // left/right split is visually obvious. Previously the AI bubble
+            // used `w-full sm:flex-1` which made it span the entire row and
+            // hid the right-alignment.
+            "max-w-[75%]",
             isUser
               ? "items-start rounded-2xl rounded-tl-sm bg-emerald-600 dark:bg-emerald-700 px-4 py-2.5 text-white"
-              : "items-end rounded-2xl rounded-tr-sm bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 px-4 py-3 w-full sm:flex-1"
+              : "items-end rounded-2xl rounded-tr-sm bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 px-4 py-3 w-full"
           )}
         >
           {/* Name label */}

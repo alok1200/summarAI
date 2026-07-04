@@ -416,3 +416,28 @@ Stage Summary:
 - The default chat AI is now instructed to fully solve problems and give complete, exhaustive, working solutions — closer to a top-tier chat assistant experience.
 - Language override (from the inline panel) continues to be honored across summary, interview, ask-about-video, and chat.
 - No regressions: type-check, lint, and production build all pass cleanly.
+
+---
+Task ID: tldr-fix
+Agent: main
+Task: Fix the ugly TL;DR — it was a 4-6 sentence wall of text instead of a scannable punchy summary.
+
+Work Log:
+- Root cause: prompts asked for "4-6 sentences naming every topic" / "5-8 sentences naming every major topic" — that produces a wall of text, not a TL;DR.
+- Added `TLDR_FORMAT` constant in `src/lib/youtube-transcript.ts` defining the proper shape: ONE punchy bottom-line sentence (≤ 25 words) + 3–5 bold bullets (each ≤ 15 words) + one italic "_Best for: <audience>_" line. Includes a concrete example (React Server Components) so the AI has a template to mimic.
+- Updated every TL;DR instruction in `src/app/api/youtube-summary/route.ts`:
+  - Short-video single-call: rewrote TL;DR section + appended `TLDR_FORMAT`.
+  - FINAL reduce (buildReduceMessages): rewrote TL;DR section + appended `TLDR_FORMAT`.
+  - MAP chunk summarize: changed "3-4 sentence overview that explicitly names every topic" → "1-sentence bottom-line summary (≤ 25 words)".
+  - SECTION reduce: changed "3-4 sentences naming every major topic" → "ONE sentence (≤ 25 words) stating the bottom line".
+  - Updated the user-message reminders: "brief TL;DR covering ALL points" → "SHORT punchy TL;DR (1 sentence + 3-5 bullets)".
+- Updated `src/app/api/chat/route.ts`:
+  - Short-video ask-about-video prompt: TL;DR guidance now matches the punchy format.
+  - Long-video ask-about-video prompt: same update.
+  - Default chat system prompt: explanation + summary instructions now specify "ONE punchy sentence + 3-5 bold bullets" and explicitly forbid walls of text.
+- Verified: `npx tsc --noEmit` → 0 errors. `npx next build` → ✓ Compiled successfully, all 12 routes generated.
+
+Stage Summary:
+- TL;DR is now scannable in 10 seconds: one bottom-line sentence, 3-5 bold bullets of concrete takeaways, and a one-line "Best for" audience note.
+- Detailed Breakdown section still covers every topic exhaustively — only the TL;DR got shorter.
+- No regressions: type-check and production build both pass.

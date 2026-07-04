@@ -133,6 +133,43 @@ export const TIMESTAMP_RULES =
   `[start]–[end] with a short title, e.g. "[3:25]–[7:48] React hooks intro".`;
 
 /**
+ * Shared instructions that define EXACTLY what a good TL;DR looks like.
+ *
+ * The previous TL;DR instruction asked for "4-6 sentences naming every topic"
+ * which produced a wall-of-text paragraph that nobody wanted to read. A real
+ * TL;DR is short, scannable, and gives the bottom line — it is NOT a list of
+ * every topic (that's what the Detailed Breakdown is for).
+ *
+ * This format is enforced across:
+ *   - /api/youtube-summary short-video prompt
+ *   - /api/youtube-summary MAP / SECTION / REDUCE prompts
+ *   - /api/youtube-interview system prompt
+ *   - /api/chat (ask-about-video) system prompt
+ *
+ * Format: 1 punchy bottom-line sentence + 3-5 bold scannable bullets + 1-line
+ * "best for" audience note. No walls of text.
+ */
+export const TLDR_FORMAT =
+  `\n\nTL;DR FORMAT (mandatory — do NOT turn this into a wall of text):\n` +
+  `The "## TL;DR" section MUST follow this exact shape:\n` +
+  `1. ONE opening sentence (≤ 25 words) that states the bottom line — what the video is about and why it matters. ` +
+  `Do NOT list every topic here; just say the single most important thing.\n` +
+  `2. Then 3–5 bold bullets, each ≤ 15 words, capturing the key takeaways. ` +
+  `Each bullet = ONE concrete insight, finding, or recommendation — NOT a topic name.\n` +
+  `3. End with one italic line: "_Best for: <who should watch this video, e.g. beginners / React devs / data engineers>_."\n\n` +
+  `Example of a GOOD TL;DR:\n` +
+  `   ## TL;DR\n` +
+  `   A 30-minute deep-dive into React Server Components — what they are, when to use them, and the gotchas the docs don't mention.\n\n` +
+  `   - **RSC renders on the server, ships zero JS to the client** — biggest perf win for content-heavy pages.\n` +
+  `   - **'use client' is opt-in per file** — defaults are server, mark client only when you need state/effects.\n` +
+  `   - **Data fetching belongs in async server components** — no more useEffect + fetch boilerplate.\n` +
+  `   - **Watch out: context doesn't cross the server/client boundary** — pass props or use a provider.\n` +
+  `   - **Next.js App Router = RSC by default** — migrating from Pages Router is the easiest way to try them.\n\n` +
+  `   _Best for: React developers familiar with hooks who want to understand the App Router's mental model._\n\n` +
+  `DO NOT write a 4-6 sentence paragraph. DO NOT list every topic — that's what the Detailed Breakdown is for. ` +
+  `Keep it punchy, scannable, and useful in 10 seconds.`;
+
+/**
  * Shared instructions that force the AI to produce a DENSE, COMPLETE
  * minute-by-minute timeline of the video — covering every 1–5 minute
  * interval so the user can jump to any moment and understand what's there.

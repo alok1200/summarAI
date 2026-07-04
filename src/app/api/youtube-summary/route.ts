@@ -10,6 +10,7 @@ import {
   parseUserTranscript,
   TIMESTAMP_RULES,
   TIMELINE_RULES,
+  TLDR_FORMAT,
   buildLanguageInstruction,
 } from "@/lib/youtube-transcript";
 import {
@@ -52,7 +53,7 @@ async function summarizeChunk(
     `(chunk ${chunk.index} of ${chunk.total}). ` +
     `Your goal is to capture EVERY topic, sub-topic, example, demo, and insight in this segment — nothing should be lost.\n\n` +
     `Produce a thorough, well-structured summary of JUST this segment with:\n` +
-    `- A 3-4 sentence overview that explicitly names every topic discussed in this segment\n` +
+    `- A 1-sentence bottom-line summary of what this segment covers (≤ 25 words) — do NOT list every topic here, just the single most important thing\n` +
     `- A DETAILED breakdown with a ### sub-heading for EVERY topic, sub-topic, or notable moment. Each sub-section must include:\n` +
     `  · The timestamp where it appears in this segment — copy it EXACTLY from the transcript (e.g. [3:25] or [1:25:30])\n` +
     `  · A long-form explanation (3-6+ sentences) of what is being discussed\n` +
@@ -113,7 +114,7 @@ async function summarizeSection(
     `from this section. Reorganize and deduplicate where the same topic appears in multiple chunks, but DO NOT drop any content.\n\n` +
     `Your output MUST follow this structure (use Markdown):\n\n` +
     `### Section Overview — ${label}\n` +
-    `3-4 sentences naming every major topic discussed in this section.\n\n` +
+    `ONE sentence (≤ 25 words) stating the bottom line of this section — do NOT list every topic, just the single most important thing.\n\n` +
     `### Detailed Breakdown — Every Point in This Section\n` +
     `For EVERY topic, sub-topic, example, or notable moment in this section, create a #### sub-heading and write a ` +
     `LONG-FORM detailed explanation (3-6+ sentences) underneath. Each sub-section must include:\n` +
@@ -189,10 +190,11 @@ function buildReduceMessages(
     `Reorganize and deduplicate where the same topic appears in multiple ${inputWord}s, but DO NOT drop any ` +
     `content — exhaustiveness is the top priority.\n\n` +
     `Your output MUST follow this exact structure (use Markdown):\n\n` +
-    `## TL;DR — All Key Points at a Glance\n` +
-    `A 5-8 sentence overview that explicitly names EVERY major topic, concept, technique, tool, and idea discussed ` +
-    `across the entire video. The reader should get a complete map of the video's coverage just from this section. ` +
-    `Do not be abstract — list concrete subject names.\n\n` +
+    `## TL;DR\n` +
+    `ONE punchy bottom-line sentence (≤ 25 words) saying what the video is about and why it matters, ` +
+    `followed by 3–5 bold bullets (each ≤ 15 words) of the key takeaways, and one italic ` +
+    `"_Best for: <audience>_" line. Do NOT list every topic — that goes in the Detailed Breakdown below. ` +
+    `Keep it scannable in 10 seconds.\n\n` +
     `## Detailed Breakdown — Every Point Explained\n` +
     `For EVERY topic, sub-topic, example, demo, or notable moment in the entire video, create a ### sub-heading ` +
     `and write a LONG-FORM detailed explanation underneath. Group related content from different ${inputWord}s together ` +
@@ -216,6 +218,7 @@ function buildReduceMessages(
     `- Do NOT be concise at the cost of completeness — exhaustiveness is the priority.\n` +
     `- When the same topic appears in multiple ${inputWord}s, MERGE the details under one heading (don't repeat).\n` +
     `- Use Markdown headings, bold, lists, and code blocks for clarity.` +
+    TLDR_FORMAT +
     TIMELINE_RULES +
     buildLanguageInstruction(ctx.language);
 
@@ -234,7 +237,7 @@ function buildReduceMessages(
     `synthesized from ${inputSummaries.length} ${inputWord} summaries)\n\n` +
     (ctx.instructions ? `User instructions: ${ctx.instructions}\n\n` : "") +
     `${inputWord.charAt(0).toUpperCase() + inputWord.slice(1)} summaries:\n\n${segmentsDescription}\n\n` +
-    `Please provide the final comprehensive unified summary now. Remember: brief TL;DR covering ALL points, ` +
+    `Please provide the final comprehensive unified summary now. Remember: a SHORT punchy TL;DR (1 sentence + 3-5 bullets), ` +
     `then DETAILED long-form coverage of EVERY single topic across all ${inputWord}s.`;
 
   return [
@@ -373,10 +376,11 @@ export async function POST(req: NextRequest) {
         "You are an expert AI assistant that produces COMPREHENSIVE, EXHAUSTIVE summaries of YouTube video transcripts. " +
         "Your goal is to cover EVERY topic, sub-topic, example, demo, and insight mentioned in the video — nothing should be left out.\n\n" +
         "Your output MUST follow this exact structure (use Markdown):\n\n" +
-        "## TL;DR — All Key Points at a Glance\n" +
-        "A 4-6 sentence overview that names EVERY major topic discussed in the video. " +
-        "Don't summarize abstractly — explicitly list every subject, technique, concept, tool, or idea mentioned, " +
-        "so the reader gets a complete map of what the video covers just from this section.\n\n" +
+        "## TL;DR\n" +
+        "ONE punchy bottom-line sentence (≤ 25 words) saying what the video is about and why it matters, " +
+        "followed by 3–5 bold bullets (each ≤ 15 words) of the key takeaways, and one italic " +
+        "\"_Best for: <audience>_\" line. Do NOT list every topic — that goes in the Detailed Breakdown below. " +
+        "Keep it scannable in 10 seconds.\n\n" +
         "## Detailed Breakdown — Every Point Explained\n" +
         "For EVERY topic, sub-topic, example, or notable moment in the video, create a ### sub-heading and write a LONG-FORM " +
         "detailed explanation underneath. Each sub-section MUST include:\n" +
@@ -397,6 +401,7 @@ export async function POST(req: NextRequest) {
         "- Do NOT invent information that isn't in the transcript.\n" +
         "- Do NOT be concise at the cost of completeness — exhaustiveness is the priority.\n" +
         "- Use Markdown headings, bold, lists, and code blocks for clarity." +
+        TLDR_FORMAT +
         TIMELINE_RULES +
         buildLanguageInstruction(language);
 
@@ -414,7 +419,7 @@ export async function POST(req: NextRequest) {
           ? `Additional instructions from the user: ${instructions}\n\n`
           : "") +
         `Transcript (with timestamps):\n\n${transcriptText}\n\n` +
-        `Provide your comprehensive structured summary now. Remember: brief TL;DR covering ALL points, then DETAILED long-form coverage of EVERY single topic.`;
+        `Provide your comprehensive structured summary now. Remember: a SHORT punchy TL;DR (1 sentence + 3-5 bullets), then DETAILED long-form coverage of EVERY single topic.`;
 
       const llmStream = await chatCompleteStream(
         [

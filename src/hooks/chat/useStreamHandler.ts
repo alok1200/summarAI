@@ -31,8 +31,18 @@ interface StreamOptions {
   assistantPrefix?: string;
   /** Called when the server returns { code: "BOT_BLOCKED" } instead of
    *  writing an error into the bubble. Lets the caller decide how to surface
-   *  bot-blocked errors (e.g. show a custom message or UI). */
-  onBotBlocked?: (message: string) => void;
+   *  bot-blocked errors (e.g. show a "paste transcript" panel). Receives the
+   *  error message and any video metadata the server was able to fetch
+   *  before the block kicked in. */
+  onBotBlocked?: (message: string, meta?: BotBlockedMeta) => void;
+}
+
+/** Video metadata forwarded with a BOT_BLOCKED error so the caller can
+ *  render a "paste transcript" panel that knows the video title/channel. */
+export interface BotBlockedMeta {
+  title?: string;
+  author?: string;
+  thumbnailUrl?: string;
 }
 
 /**
@@ -122,10 +132,11 @@ export function useStreamHandler() {
           }
 
           if (errCode === "BOT_BLOCKED" && onBotBlocked) {
-            onBotBlocked(errMsg);
-            // Graceful "try again later" message. The manual-paste fallback
-            // was removed from the UI; this is the honest, self-contained
-            // explanation the user sees instead.
+            onBotBlocked(errMsg, errMeta);
+            // Graceful "try again later" message. The user can scroll down
+            // to find a "Paste transcript manually" panel right below the
+            // chat input, which lets them bypass the IP block entirely by
+            // pasting the transcript text directly.
             const metaLine = errMeta?.title
               ? `**Video:** ${errMeta.title}${
                   errMeta.author ? ` — ${errMeta.author}` : ""
@@ -141,7 +152,11 @@ export function useStreamHandler() {
                 `**What you can do:**\n` +
                 `- **Try again in a few minutes** — most blocks clear on their own.\n` +
                 `- **Try a different video** — blocks are IP- and video-specific, so another ` +
-                `video usually works fine.\n\n` +
+                `video usually works fine.\n` +
+                `- **Paste the transcript manually** — use the panel below to paste the ` +
+                `transcript text from YouTube (open the video, click "⋯ More", then ` +
+                `"Show transcript", then copy-paste it here). This bypasses the block ` +
+                `entirely because we no longer need to fetch anything from YouTube.\n\n` +
                 `You can click the timestamp badge above to open the video on YouTube while you wait.`
             );
           } else {

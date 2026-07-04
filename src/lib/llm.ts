@@ -47,8 +47,10 @@ const RETRY_CONFIG = {
  *
  * We do NOT retry on:
  *   - HTTP 400/401/403/422 (client errors — retrying won't help)
+ *
+ * Exported so the retry policy can be unit-tested directly.
  */
-function isTransientError(err: unknown): boolean {
+export function isTransientError(err: unknown): boolean {
   if (!err) return false;
   const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
   const status = (err as any)?.status ?? (err as any)?.statusCode;
@@ -235,8 +237,10 @@ export async function visionComplete(
  *
  * The parser is tolerant of partial chunks (a JSON object split across
  * multiple Uint8Array yields) by buffering incomplete lines.
+ *
+ * Exported so the streaming-parser logic can be unit-tested directly.
  */
-class SSEParser {
+export class SSEParser {
   private buffer = "";
 
   feed(chunk: Uint8Array | string): string[] {
@@ -269,12 +273,21 @@ class SSEParser {
     return out;
   }
 
-  /** Flush any remaining buffer content. Usually a no-op. */
+  /**
+   * Flush any remaining buffer content. Usually a no-op when the stream
+   * ended with a trailing newline, but if the SDK's stream ends mid-line
+   * (no trailing `\n`), the buffer holds a complete `data:` payload that
+   * `feed()` would otherwise just re-buffer forever. We append a newline
+   * so feed() treats the buffered content as a complete line and parses it.
+   *
+   * Without this fix, the final content delta of a stream can be silently
+   * dropped — caught by the SSEParser unit tests.
+   */
   flush(): string[] {
     if (!this.buffer.trim()) return [];
     const leftover = this.buffer;
     this.buffer = "";
-    return this.feed(leftover);
+    return this.feed(leftover + "\n");
   }
 }
 

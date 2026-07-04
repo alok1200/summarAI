@@ -41,6 +41,56 @@ const UA =
   "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
 /**
+ * Optional reverse-proxy prefix for ALL outbound YouTube requests.
+ *
+ * When `YOUTUBE_PROXY_URL` is set in the environment, every `fetch()` we make
+ * to `www.youtube.com` (cookie warming, InnerTube player, watch-page scrape,
+ * timedtext caption fetch) is rerouted through this proxy by URL-prefixing:
+ *
+ *   original:  https://www.youtube.com/watch?v=ID
+ *   proxied:   ${YOUTUBE_PROXY_URL}https://www.youtube.com/watch?v=ID
+ *
+ * The proxy is expected to be a simple reverse proxy (Cloudflare Worker /
+ * nginx / Caddy / a tiny Express app) running on a DIFFERENT IP than this
+ * server. YouTube's IP-level rate limiter will then see the proxy's IP, not
+ * ours — which is the only client-side workaround for the "Sign in to
+ * confirm you're not a bot" block that affects all 4 in-process strategies
+ * simultaneously.
+ *
+ * Format: a fully-qualified URL prefix, e.g.
+ *   YOUTUBE_PROXY_URL="https://my-yt-proxy.example.workers.dev/?url="
+ *   YOUTUBE_PROXY_URL="https://user:pass@proxy.example.com/"
+ *
+ * Leave empty (the default) → all requests go direct from this server's IP.
+ *
+ * NOTE: this only proxies OUR fetches. The youtube-transcript npm package and
+ * youtubei.js make their own internal fetches that we can't intercept, so
+ * those strategies still hit YouTube directly. The proxy primarily helps
+ * strategies 1 (ANDROID) and 2 (watch-page) — which are the most reliable
+ * anyway.
+ */
+function proxiedFetch(
+  url: string,
+  init?: RequestInit
+): Promise<Response> {
+  const proxy = process.env.YOUTUBE_PROXY_URL;
+  if (proxy && proxy.trim() !== "") {
+    return fetch(`${proxy}${url}`, init);
+  }
+  return fetch(url, init);
+}
+
+/**
+ * Whether the YOUTUBE_PROXY_URL override is currently configured. Surfaced
+ * so the bot-blocked error message can tell the operator what to do
+ * (configure a proxy) versus what to tell the end user (paste transcript).
+ */
+export function isYouTubeProxyConfigured(): boolean {
+  const v = process.env.YOUTUBE_PROXY_URL;
+  return !!v && v.trim() !== "";
+}
+
+/**
  * Warmed cookie jar — fetched ONCE per process (and refreshed if older than
  * 10 min). YouTube sets `CONSENT` and `VISITOR_INFO1_LIVE` cookies on the
  * first request to youtube.com; subsequent requests that carry these cookies
@@ -59,7 +109,7 @@ async function warmCookies(): Promise<string> {
     return warmedCookies.cookieHeader;
   }
   try {
-    const res = await fetch("https://www.youtube.com/", {
+    const res = await proxiedFetch("https://www.youtube.com/", {
       headers: {
         "User-Agent": UA,
         "Accept-Language": "en-US,en;q=0.9",
@@ -436,7 +486,7 @@ async function fetchCaptionTracksViaAndroidPlayer(
     videoId,
   };
 
-  const res = await fetch(
+  const res = await proxiedFetch(
     "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
     {
       method: "POST",
@@ -480,7 +530,7 @@ async function fetchCaptionTracksViaWatchPage(
 ): Promise<CaptionTrack[] | null> {
   const cookieHeader = await warmCookies();
   const watchUrl = `https://www.youtube.com/watch?v=${videoId}`;
-  const res = await fetch(watchUrl, {
+  const res = await proxiedFetch(watchUrl, {
     headers: {
       "User-Agent": UA,
       "Accept-Language": "en-US,en;q=0.9",
@@ -665,7 +715,7 @@ async function fetchAndParseCaptionTracks(
   const trackUrl = normalizeTrackUrl(track.baseUrl);
   const cookieHeader = await warmCookies();
 
-  const captionRes = await fetch(trackUrl, {
+  const captionRes = await proxiedFetch(trackUrl, {
     headers: {
       "User-Agent": UA,
       "Accept-Language": "en-US,en;q=0.9",
@@ -817,14 +867,18 @@ export async function fetchTranscriptWithRetry(
 
   if (!segments || segments.length === 0) {
     if (botBlockedSeen) {
-      // Note: the manual-paste fallback was removed from the UI. This message
-      // is surfaced to the user as a graceful "try again later" — no broken
-      // instructions, no dead-end UI references. The page.tsx handler replaces
-      // this text with its own friendlier copy before showing the user.
+      // The manual-paste fallback is wired up in the UI (page.tsx shows a
+      // "Paste transcript manually" panel when this BOT_BLOCKED code is
+      // returned). The operator can also configure YOUTUBE_PROXY_URL to
+      // route future requests through a different IP.
+      const proxyNote = isYouTubeProxyConfigured()
+        ? ""
+        : " (Server operator: set YOUTUBE_PROXY_URL to route requests through a different IP.)";
       const friendlyMessage =
         "YouTube is rate-limiting this server's IP and asking us to sign in to " +
         "confirm we're not a bot. This is temporary and usually clears within a " +
-        "few minutes. Please try again, or try a different video.";
+        "few minutes. Please try again, try a different video, or use the " +
+        "'Paste transcript manually' option below." + proxyNote;
       const err = new Error(friendlyMessage) as BotBlockedError;
       err.code = "BOT_BLOCKED";
       throw err;

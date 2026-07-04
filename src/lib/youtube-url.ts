@@ -25,9 +25,14 @@ const YOUTUBE_URL_PATTERNS: RegExp[] = [
  * Single regex that matches the FULL URL (including any extra query params
  * like &t=120s or &feature=share) once any of the patterns above hit.
  * Used to extract the exact URL string from a longer user message.
+ *
+ * `[^\s]*?` (not `+?`) is intentional: a bare youtu.be URL like
+ * `https://youtu.be/ID` has ZERO chars between `//` and `youtu`, so the
+ * prefix must be allowed to be empty. (For `www.youtube.com/...` the
+ * non-greedy match still expands to consume `www.` first.)
  */
 const YOUTUBE_FULL_URL_REGEX =
-  /https?:\/\/[^\s]+?(?:youtube\.com\/watch\?v=[A-Za-z0-9_-]+|youtu\.be\/[A-Za-z0-9_-]+|youtube\.com\/(?:embed|shorts|live)\/[A-Za-z0-9_-]+)[^\s]*/;
+  /https?:\/\/[^\s]*?(?:youtube\.com\/watch\?v=[A-Za-z0-9_-]+|youtu\.be\/[A-Za-z0-9_-]+|youtube\.com\/(?:embed|shorts|live)\/[A-Za-z0-9_-]+)[^\s]*/;
 
 /**
  * Detect a YouTube URL anywhere in a string and return the full URL (with
@@ -100,13 +105,19 @@ export function detectLanguage(text: string): string | undefined {
  * the React parts"). Also strips leading "summarize this video:" prefixes.
  *
  * Returns the trimmed remainder, or "" if the message was just the URL.
+ *
+ * IMPORTANT: the prefix regex below lists longer alternatives FIRST.
+ * JavaScript regex alternation is leftmost-match-wins (not longest-match-
+ * wins like POSIX), so if `summarize` came before `summarize this video` in
+ * the alternation, the shorter `summarize` would always win and leave
+ * behind "this video:" — defeating the whole point of the strip.
  */
 export function extractInstructions(text: string, ytUrl: string): string {
   return text
     .replace(ytUrl, "")
     .replace(/\bin\s+[A-Z][a-zA-Z]{2,}\b/g, "")
     .replace(
-      /^(summarize|summarise|tl;?dr|summary of|summarize this|summarize this video|summarize this for me)[:\s,]*/i,
+      /^(summarize this video|summarize this for me|summarize this|summary of|summarize|summarise|tl;?dr)[:\s,]*/i,
       ""
     )
     .trim();

@@ -18,6 +18,10 @@
     "isolatedModules": true,
     "jsx": "react-jsx",
     "incremental": true,
+    // Include bun-types so the test files (which import from "bun:test")
+    // and scripts/db-backup.ts (which imports from "bun:sqlite") type-check.
+    // bun-types is a superset of @types/node, so this also covers Node APIs.
+    "types": ["bun-types"],
     "plugins": [
       {
         "name": "next"

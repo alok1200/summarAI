@@ -639,3 +639,193 @@ Stage Summary:
 - Accessibility: prefers-reduced-motion disables animations. focus-visible:ring on all buttons. aria-labels on icon-only buttons.
 - Functionality: ZERO changes. Same endpoints, same payloads, same UX flows. All smoke tests pass.
 - Files changed: src/app/page.tsx (rewritten), src/components/chat/MessageBubble.tsx, src/components/chat/ChatInput.tsx, src/components/chat/EmptyState.tsx, src/components/chat/LoginScreen.tsx, src/components/chat/Sidebar.tsx, src/app/globals.css. New: src/lib/youtube-url.ts, src/hooks/chat/useStreamHandler.ts, src/hooks/chat/useRegenerate.ts, src/hooks/chat/useAutoScroll.ts.
+
+---
+Task ID: 17
+Agent: main
+Task: Address three remaining gaps the user flagged:
+  (1) No automated tests anywhere in the project.
+  (2) YouTube bot-block has no real workaround (IP-level rate limit).
+  (3) SQLite has no backup story.
+
+Work Log:
+
+=== (1) AUTOMATED TESTS — bun:test framework + 121 unit tests ===
+
+- Set up `bun test` as the test runner (bun was already the package manager;
+  no extra deps needed because `bun:test` is built in).
+- Added `"test": "bun test"` and `"test:watch": "bun test --watch"` npm scripts.
+- Added `"types": ["bun-types"]` to tsconfig.json so `bun:test` and `bun:sqlite`
+  imports type-check (bun-types is a superset of @types/node).
+- Exported two previously-private helpers from src/lib/llm.ts so they can be
+  unit-tested directly: `isTransientError()` and `class SSEParser`. Both have
+  pure logic worth testing; exporting them is a non-behavioral change.
+- Wrote 5 test files (121 tests, 243 assertions) covering the pure logic of
+  every lib module:
+    * src/lib/__tests__/youtube-url.test.ts         — 23 tests
+      (detectYouTubeUrl, extractVideoIdFromUrl, detectLanguage, extractInstructions)
+    * src/lib/__tests__/youtube-transcript.test.ts  — 36 tests
+      (extractVideoId, parseTimeString, formatTime, parseUserTranscript,
+       buildLanguageInstruction)
+    * src/lib/__tests__/youtube-chunks.test.ts      — 22 tests
+      (chunkTranscript, shouldUseMapReduce, estimateChunkCount, planReduce,
+       groupLabel, mapChunks — incl. concurrency-limit + failure-isolation tests)
+    * src/lib/__tests__/llm.test.ts                 — 29 tests
+      (isTransientError, withRetry, getLLMModel, getLLMVisionModel, SSEParser
+       — incl. partial-line buffering, [DONE] sentinel, malformed-JSON handling)
+    * src/lib/__tests__/auth.test.ts                — 11 tests
+      (hashPassword, verifyPassword — incl. Unicode, malformed-hash, and
+       constant-time-comparison smoke tests)
+
+- THE TESTS FOUND 4 REAL BUGS (which I fixed in this same task):
+
+  Bug 1 — detectYouTubeUrl("https://youtu.be/dQw4w9WgXcQ") returned null.
+    Root cause: YOUTUBE_FULL_URL_REGEX used `[^\s]+?` (requires 1+ chars
+    before the alternation), but a bare youtu.be URL has 0 chars between
+    `//` and the host. Fix: changed `+?` → `*?` so the prefix is optional.
+
+  Bug 2 — extractInstructions("summarize this video: <URL>") returned
+  "this video: " instead of "".
+    Root cause: JavaScript regex alternation is leftmost-match-wins (not
+    longest-match-wins). The pattern `summarize|summarize this|summarize
+    this video` always matched the shortest alternative first. Fix:
+    reordered the alternation from longest to shortest
+    (`summarize this video|summarize this for me|summarize this|summarize|...`).
+
+  Bug 3 — extractInstructions("summarize this in Hindi: <URL> focus on hooks")
+  returned "this : focus on hooks" instead of "focus on hooks".
+    Same root cause as Bug 2. Same fix.
+
+  Bug 4 — SSEParser.flush() silently dropped the final content delta when
+  the SSE stream ended without a trailing newline.
+    Root cause: flush() called feed(leftover) which re-buffered the line
+    instead of processing it (feed() splits on \n, and a single line with
+    no \n goes back into the buffer). In production this meant the very
+    last LLM token of a streaming response could be silently dropped if
+    the SDK's stream didn't end with `\n\n`. Fix: flush() now calls
+    feed(leftover + "\n") so the buffered line is treated as complete.
+
+=== (2) YOUTUBE BOT-BLOCK WORKAROUND — proxy support + paste-transcript UI ===
+
+The user is right that IP-level rate limits can't be fixed in pure code —
+all 4 in-process strategies (InnerTube ANDROID, watch-page scrape,
+youtube-transcript lib, youtubei.js) originate from the same server IP, so
+when YouTube rate-limits that IP, all 4 fail simultaneously. I added two
+complementary workarounds:
+
+Backend — YOUTUBE_PROXY_URL env var (src/lib/youtube-transcript.ts):
+- New `proxiedFetch(url, init)` helper: if `YOUTUBE_PROXY_URL` is set, every
+  outbound YouTube fetch is rerouted through `${YOUTUBE_PROXY_URL}${url}`.
+  The proxy is expected to be a simple reverse proxy (Cloudflare Worker /
+  nginx / Caddy) running on a different IP. YouTube's rate limiter then
+  sees the proxy's IP, not ours.
+- Replaced the 4 direct `fetch()` calls in youtube-transcript.ts with
+  `proxiedFetch()`: cookie warming, ANDROID player, watch-page scrape,
+  caption-track fetch.
+- Exported `isYouTubeProxyConfigured()` so the BOT_BLOCKED error message
+  can tell the operator "set YOUTUBE_PROXY_URL" when the proxy isn't
+  configured.
+- Updated the BOT_BLOCKED error message to mention both the paste-transcript
+  UI option (for end users) and the YOUTUBE_PROXY_URL option (for operators).
+- Documented YOUTUBE_PROXY_URL in .env.example with format examples and a
+  clear note about what it does/doesn't proxy (3rd-party libs still hit
+  YouTube directly).
+
+Frontend — PasteTranscriptPanel (src/components/chat/PasteTranscriptPanel.tsx):
+- New component: shown above the chat input when BOT_BLOCKED is returned.
+  Has a textarea + "Paste from clipboard" button + "Summarize pasted
+  transcript" button. Includes how-to instructions ("open video → ⋯ More
+  → Show transcript → copy → paste").
+- Wired up via `onBotBlocked` callback in useStreamHandler:
+  * Extended the callback signature from `(message: string)` to
+    `(message: string, meta?: BotBlockedMeta)` so the panel can show the
+    video title/channel. Backward-compatible (second arg is optional).
+  * page.tsx now sets `botBlockedVideo` state on BOT_BLOCKED, with the
+    URL, videoId, videoMeta, instructions, and language from the original
+    request (so the re-dispatch carries them forward).
+  * handlePasteTranscriptSubmit re-dispatches to /api/youtube-summary with
+    the same URL + the `transcript` body param — the API already handles
+    this case (parseUserTranscript + skip-auto-fetch path).
+  * handlePasteTranscriptCancel just clears the state.
+- Updated the bot-blocked user-facing message in useStreamHandler to
+  mention the paste option (was previously telling users to "try again
+  later" with no escape hatch; now points them at the panel below).
+
+This gives users TWO ways to escape an IP block:
+  - Operator: set YOUTUBE_PROXY_URL → all future requests go through the
+    proxy IP. Zero-config for end users.
+  - End user: paste the transcript manually → bypasses YouTube entirely
+    because the summary endpoint doesn't need to fetch anything.
+
+=== (3) SQLite BACKUP STORY — VACUUM INTO + cron-friendly CLI ===
+
+- New script: scripts/db-backup.ts (uses `bun:sqlite`, no extra deps).
+  Commands:
+    bun run scripts/db-backup.ts                   # one-shot backup
+    bun run scripts/db-backup.ts --list            # list backups (newest first)
+    bun run scripts/db-backup.ts --prune           # delete beyond retention
+    bun run scripts/db-backup.ts --restore <name>  # restore (with safety backup)
+  Env vars (all optional, all documented in .env.example):
+    DATABASE_URL       (default: file:./db/custom.db)
+    BACKUP_DIR         (default: ./backups)
+    BACKUP_RETENTION   (default: 30)
+    BACKUP_COMPRESS    (default: "1" = gzip)
+- Added npm scripts: db:backup, db:backup:list, db:backup:prune, db:restore.
+- WHY VACUUM INTO, not `cp`:
+  SQLite uses WAL mode by default; a raw `cp db/custom.db backups/` can
+  capture the DB in an inconsistent state if a write is in flight.
+  `VACUUM INTO 'path'` is SQLite's built-in Online Backup mechanism
+  (since 3.27, 2019) — produces a transactionally-consistent snapshot
+  even while the DB is being written to. Same guarantee as `sqlite3
+  .backup`, no shell-out needed. Source is opened read-only so we don't
+  conflict with the running Prisma server.
+- Restore creates a "pre-restore" safety backup BEFORE overwriting the
+  live DB, so a botched restore is always recoverable.
+- Auto-prune: after each backup, deletes oldest backups beyond
+  BACKUP_RETENTION count. Cron-friendly — recommended setup documented
+  in .env.example:
+    0 3 * * *  cd /path/to/app && npm run db:backup >> /var/log/db-backup.log 2>&1
+- Added /backups/ to .gitignore.
+- Smoke-tested all 4 commands end-to-end:
+  * backup → 5.5 KB gzipped, 3-5ms
+  * list → shows timestamped entries newest-first
+  * restore → creates pre-restore safety backup, then overwrites live DB
+  * prune (BACKUP_RETENTION=2) → deletes oldest, keeps newest 2
+
+=== VERIFICATION ===
+
+- bun test → 121 pass, 0 fail, 243 expect() calls, ~6s
+- npx tsc --noEmit → clean, 0 errors
+- npm run lint → 0 errors, 3 warnings (all pre-existing unused eslint-disable
+  directives on lines I didn't touch)
+- bun run scripts/db-backup.ts → ✓ backup, ✓ list, ✓ restore, ✓ prune
+- Dev server hot-reloaded all changes cleanly; GET / → 200 in ~600ms.
+
+Stage Summary:
+- 121 unit tests covering all 5 lib modules. Tests caught 4 real bugs
+  (1 URL-parsing, 2 instruction-stripping, 1 SSE-streaming) — all fixed.
+- YouTube bot-block now has 2 workarounds: server-side YOUTUBE_PROXY_URL
+  (for operators) and client-side PasteTranscriptPanel (for end users).
+  Together they cover both deployment shapes.
+- SQLite now has a cron-friendly backup story: VACUUM INTO for consistency,
+  gzip compression, retention-based auto-prune, safety-backup-before-restore.
+- Files added:
+    src/lib/__tests__/youtube-url.test.ts
+    src/lib/__tests__/youtube-transcript.test.ts
+    src/lib/__tests__/youtube-chunks.test.ts
+    src/lib/__tests__/llm.test.ts
+    src/lib/__tests__/auth.test.ts
+    src/components/chat/PasteTranscriptPanel.tsx
+    scripts/db-backup.ts
+- Files changed:
+    src/lib/youtube-url.ts        (Bug 1 + Bugs 2/3 fixes)
+    src/lib/youtube-transcript.ts (proxiedFetch + YOUTUBE_PROXY_URL + bot-blocked msg)
+    src/lib/llm.ts                (exported isTransientError + SSEParser, Bug 4 fix)
+    src/hooks/chat/useStreamHandler.ts (onBotBlocked signature + paste-mention msg)
+    src/app/page.tsx              (botBlockedVideo state + paste handlers + panel render)
+    src/lib/__tests__/*           (new test files)
+    package.json                  (test, test:watch, db:backup, db:backup:list,
+                                   db:backup:prune, db:restore scripts)
+    tsconfig.json                 (added "types": ["bun-types"])
+    .env.example                  (YOUTUBE_PROXY_URL + backup env vars documented)
+    .gitignore                    (added /backups/)

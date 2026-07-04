@@ -14,6 +14,7 @@ import { MessageBubble } from "@/components/chat/MessageBubble";
 import { ChatInput } from "@/components/chat/ChatInput";
 import { EmptyState } from "@/components/chat/EmptyState";
 import { LoginScreen } from "@/components/chat/LoginScreen";
+import { PasteTranscriptPanel } from "@/components/chat/PasteTranscriptPanel";
 import { cn } from "@/lib/utils";
 import {
   detectYouTubeUrl,
@@ -21,9 +22,22 @@ import {
   extractVideoIdFromUrl,
   extractInstructions,
 } from "@/lib/youtube-url";
-import { useStreamHandler, genId } from "@/hooks/chat/useStreamHandler";
+import { useStreamHandler, genId, type BotBlockedMeta } from "@/hooks/chat/useStreamHandler";
 import { useRegenerate } from "@/hooks/chat/useRegenerate";
 import { useAutoScroll } from "@/hooks/chat/useAutoScroll";
+
+/**
+ * State held when the server returns BOT_BLOCKED. The PasteTranscriptPanel
+ * uses this to re-call /api/youtube-summary with the same URL + the pasted
+ * transcript text, bypassing the IP block entirely.
+ */
+interface BotBlockedState {
+  url: string;
+  videoId: string;
+  videoMeta?: BotBlockedMeta;
+  instructions?: string;
+  language?: string;
+}
 
 export default function Home() {
   const {
@@ -38,6 +52,14 @@ export default function Home() {
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [hasHydrated, setHasHydrated] = useState(false);
+  /**
+   * Set when /api/youtube-summary returns BOT_BLOCKED. While set, the
+   * PasteTranscriptPanel is shown above the chat input so the user can
+   * paste the transcript text manually and bypass the IP block. Cleared
+   * when the user submits the paste (re-dispatches to /api/youtube-summary
+   * with the transcript param) or clicks Cancel.
+   */
+  const [botBlockedVideo, setBotBlockedVideo] = useState<BotBlockedState | null>(null);
   const { user, loading: authLoading, fetchMe } = useAuth();
 
   // ─── Effects ───────────────────────────────────────────────────────────
@@ -78,6 +100,59 @@ export default function Home() {
     isStreaming,
     videoContext,
   });
+
+  /**
+   * Called when the user pastes a transcript into the PasteTranscriptPanel
+   * and clicks "Summarize pasted transcript". Re-dispatches to
+   * /api/youtube-summary with the same URL + the pasted transcript —
+   * bypassing the YouTube IP block entirely because the summary route
+   * skips the auto-fetch step when `transcript` is provided in the body.
+   */
+  const handlePasteTranscriptSubmit = useCallback(
+    async (transcript: string) => {
+      if (!botBlockedVideo) return;
+      const { url, videoId, videoMeta, instructions, language } = botBlockedVideo;
+
+      const userMsg: ChatMessage = {
+        id: genId(),
+        role: "user",
+        content: `📋 Pasted transcript for ${url}${
+          videoMeta?.title ? ` — ${videoMeta.title}` : ""
+        } (${transcript.length} chars)`,
+        createdAt: Date.now(),
+        youtubeMeta: { url, videoId },
+      };
+
+      const apiPayload: Record<string, unknown> = {
+        url,
+        transcript,
+        ...(instructions ? { instructions } : {}),
+        ...(language ? { language } : {}),
+      };
+
+      // Clear the bot-blocked state so the panel disappears — we're
+      // re-dispatching now, so showing both the panel and a new in-flight
+      // assistant bubble would be confusing.
+      setBotBlockedVideo(null);
+
+      await runStream({
+        userMessage: userMsg,
+        endpoint: "/api/youtube-summary",
+        payload: apiPayload,
+        assistantPrefix: "⏳ Summarizing your pasted transcript…",
+      });
+    },
+    [botBlockedVideo, runStream]
+  );
+
+  /**
+   * Dismiss the PasteTranscriptPanel without re-dispatching. The user
+   * already has the "rate-limited, try again later" message in the
+   * assistant bubble; dismissing the panel just hides the paste UI.
+   */
+  const handlePasteTranscriptCancel = useCallback(() => {
+    setBotBlockedVideo(null);
+  }, []);
 
   // ─── Auto-scroll behavior ──────────────────────────────────────────────
   // Auto-scroll on new messages or new streamed chunks, but ONLY if the
@@ -146,11 +221,20 @@ export default function Home() {
           endpoint: "/api/youtube-summary",
           payload: apiPayload,
           assistantPrefix: "⏳ Fetching transcript and preparing summary…",
-          // No-op callback — runStream itself writes the graceful
-          // "try again later" message into the assistant bubble on
-          // BOT_BLOCKED. We pass the no-op so it knows to take that branch
-          // (it gates the BOT_BLOCKED message on `onBotBlocked` being truthy).
-          onBotBlocked: () => {},
+          // When YouTube rate-limits this server's IP, set the bot-blocked
+          // state so the PasteTranscriptPanel appears below the chat input.
+          // The user can then paste the transcript text manually and we'll
+          // re-dispatch to /api/youtube-summary with the `transcript` param
+          // — bypassing the IP block entirely.
+          onBotBlocked: (_msg, meta) => {
+            setBotBlockedVideo({
+              url: ytUrl,
+              videoId,
+              videoMeta: meta,
+              instructions: remaining || undefined,
+              language: language || undefined,
+            });
+          },
         });
         return;
       }
@@ -361,6 +445,20 @@ export default function Home() {
         >
           <ChevronDown className="h-4 w-4" />
         </button>
+
+        {/* Bot-blocked fallback: paste-transcript panel. Shown when the
+            server returned BOT_BLOCKED for a YouTube URL — lets the user
+            paste the transcript text manually and bypass the IP block. */}
+        {botBlockedVideo && (
+          <PasteTranscriptPanel
+            url={botBlockedVideo.url}
+            videoMeta={botBlockedVideo.videoMeta}
+            language={botBlockedVideo.language}
+            instructions={botBlockedVideo.instructions}
+            onSubmit={handlePasteTranscriptSubmit}
+            onCancel={handlePasteTranscriptCancel}
+          />
+        )}
 
         {/* Chat input — always rendered. When the user pastes a YouTube URL,
             a "Summarize video →" chip appears above the input; clicking it

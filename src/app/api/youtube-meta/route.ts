@@ -8,9 +8,9 @@ export const dynamic = "force-dynamic";
  * GET /api/youtube-meta?videoId=...  (or ?url=...)
  *
  * Returns lightweight YouTube video metadata (title, author, thumbnail) using
- * the public oEmbed endpoint. Used by the YouTubeInlinePanel to show a preview card
- * with the thumbnail + title + channel as soon as the user pastes a valid URL,
- * so they can confirm "yes, this is the right video" before clicking Summarize.
+ * the public oEmbed endpoint. Currently unused by the chat UI (the panel that
+ * consumed it was removed in favor of a simpler "paste URL → summarize" flow),
+ * but kept here so future features (e.g. a video preview chip) can reuse it.
  *
  * This endpoint is NOT bot-protected (oEmbed is a public, CORS-friendly API).
  */

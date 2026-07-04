@@ -15,11 +15,56 @@ import { MessageBubble } from "@/components/chat/MessageBubble";
 import { ChatInput } from "@/components/chat/ChatInput";
 import { EmptyState } from "@/components/chat/EmptyState";
 import { LoginScreen } from "@/components/chat/LoginScreen";
-import {
-  YouTubeInlinePanel,
-  type YouTubeSubmitPayload,
-} from "@/components/chat/YouTubeInlinePanel";
 import { cn } from "@/lib/utils";
+
+/**
+ * Detect a YouTube URL anywhere in a string and return it (with any
+ * trailing URL chars). Returns null if no YouTube URL is present.
+ *
+ * Used by sendMessage to auto-route pasted YouTube links to the summary
+ * endpoint — no panel, no settings, just paste & summarize.
+ */
+function detectYouTubeUrl(text: string): string | null {
+  const patterns: RegExp[] = [
+    /(?:youtube\.com\/watch\?v=)([A-Za-z0-9_-]{11})/,
+    /(?:youtu\.be\/)([A-Za-z0-9_-]{11})/,
+    /(?:youtube\.com\/embed\/)([A-Za-z0-9_-]{11})/,
+    /(?:youtube\.com\/shorts\/)([A-Za-z0-9_-]{11})/,
+    /(?:youtube\.com\/live\/)([A-Za-z0-9_-]{11})/,
+  ];
+  for (const p of patterns) {
+    if (p.test(text)) {
+      const fullMatch = text.match(
+        /https?:\/\/[^\s]+?(?:youtube\.com\/watch\?v=[A-Za-z0-9_-]+|youtu\.be\/[A-Za-z0-9_-]+|youtube\.com\/(?:embed|shorts|live)\/[A-Za-z0-9_-]+)[^\s]*/
+      );
+      return fullMatch?.[0] ?? null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Extract an optional language hint from a user message. Looks for the
+ * pattern "in <Language>" near the end of the message, where <Language> is
+ * a capitalized word (e.g. "in Hindi", "in Spanish", "in French").
+ * Returns the language name, or undefined if no language is specified.
+ *
+ * This lets the user type "summarize this in Hindi: <URL>" and have the
+ * entire response generated in Hindi — without needing a settings panel.
+ */
+function detectLanguage(text: string): string | undefined {
+  const m = text.match(/\bin\s+([A-Z][a-zA-Z]{2,})\b/);
+  if (!m) return undefined;
+  const lang = m[1].trim();
+  // Filter out obvious false positives (e.g. "in JavaScript", "in Python").
+  const falsePositives = new Set([
+    "JavaScript", "TypeScript", "Python", "Java", "React", "Vue",
+    "Angular", "Node", "Rust", "Go", "Swift", "Kotlin", "Ruby",
+    "PHP", "C++", "C#",
+  ]);
+  if (falsePositives.has(lang)) return undefined;
+  return lang;
+}
 
 function genId() {
   return (
@@ -42,11 +87,6 @@ export default function Home() {
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [hasHydrated, setHasHydrated] = useState(false);
-  const [youtubeOpen, setYoutubeOpen] = useState(false);
-  const [youtubeBotHint, setYoutubeBotHint] = useState<string | null>(null);
-  /** Pre-filled URL for the YouTubeInlinePanel — set when the user clicks the
-   * "Open YouTube dialog →" chip after pasting a YouTube link. */
-  const [youtubeInitialUrl, setYoutubeInitialUrl] = useState<string | undefined>(undefined);
   const scrollRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -283,11 +323,11 @@ export default function Home() {
                 `this happens on videos with stricter bot protection (music videos, ` +
                 `TED talks, livestreams, etc.).\n\n` +
                 `**How to still get your summary:**\n` +
-                `1. Click the **"Open video on YouTube"** button in the dialog (or open the video yourself)\n` +
-                `2. Below the video, click **"… More"** → **"Show transcript"**\n` +
-                `3. Copy the transcript text from the panel that opens\n` +
-                `4. Paste it into the **"Paste transcript manually"** box in the dialog\n` +
-                `5. Click **Summarize** — you'll get your summary in seconds`
+                `1. Open the video on YouTube (click the timestamp badge above this message).\n` +
+                `2. Below the video, click **"… More"** → **"Show transcript"**.\n` +
+                `3. Copy the transcript text from the panel that opens.\n` +
+                `4. Paste it back here as a normal chat message starting with "summarize this transcript:" ` +
+                `and I'll summarize it for you in seconds.`
             );
           } else {
             throw new Error(errMsg);
@@ -335,6 +375,69 @@ export default function Home() {
   const sendMessage = useCallback(
     async (text: string, attachments: Attachment[]) => {
       if (!text.trim() && attachments.length === 0) return;
+
+      // ---------- YouTube URL auto-route ----------
+      // If the user's message contains a YouTube URL, skip the chat endpoint
+      // entirely and send it straight to /api/youtube-summary. This is the
+      // "one page, no panel" flow: paste URL → click send → get summary.
+      //
+      // We also detect an optional "in <Language>" hint in the message so the
+      // user can write "summarize this in Hindi: <URL>" and the entire
+      // response will be in Hindi. The remaining text (minus URL + language
+      // hint) becomes the `instructions` field if non-empty.
+      const ytUrl = detectYouTubeUrl(text);
+      if (ytUrl && attachments.length === 0) {
+        const language = detectLanguage(text);
+        // Strip the URL and "in <Lang>" from the message to extract any
+        // remaining user instructions (e.g. "focus on the React parts").
+        const remaining = text
+          .replace(ytUrl, "")
+          .replace(/\bin\s+[A-Z][a-zA-Z]{2,}\b/g, "")
+          .replace(/^(summarize|summarise|tl;?dr|summary of|summarize this|summarize this video|summarize this for me)[:\s,]*/i, "")
+          .trim();
+
+        // Extract video ID for the meta badge on the user's message bubble.
+        const vidMatch = ytUrl.match(/(?:youtube\.com\/(?:watch\?v=|embed\/|shorts\/|live\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/);
+        const videoId = vidMatch?.[1] ?? "";
+
+        const meta: YouTubeMeta = {
+          url: ytUrl,
+          videoId,
+        };
+
+        const userMsg: ChatMessage = {
+          id: genId(),
+          role: "user",
+          content:
+            `Summarize this YouTube video${language ? ` in ${language}` : ""}: ${ytUrl}` +
+            (remaining ? `. ${remaining}` : ""),
+          createdAt: Date.now(),
+          youtubeMeta: meta,
+        };
+
+        const apiPayload: Record<string, unknown> = {
+          url: ytUrl,
+          // No startTime / endTime / transcript / instructions / language
+          // unless the user explicitly provided them. Auto-fetch only —
+          // the user said "don't ask me", so we just go.
+          ...(remaining ? { instructions: remaining } : {}),
+          ...(language ? { language } : {}),
+        };
+
+        await runStream(
+          userMsg,
+          "/api/youtube-summary",
+          apiPayload,
+          "⏳ Fetching transcript and preparing summary…",
+          // Bot-blocked callback: we no longer reopen a panel, but we still
+          // need to pass SOMETHING so the runStream knows to write the
+          // friendly "open the video + paste transcript" message. A no-op
+          // is fine — runStream writes the message regardless of what the
+          // callback does.
+          () => {}
+        );
+        return;
+      }
 
       const userMsg: ChatMessage = {
         id: genId(),
@@ -394,272 +497,6 @@ export default function Home() {
     [activeId, runStream]
   );
 
-  const handleYouTube = useCallback(
-    async (payload: YouTubeSubmitPayload) => {
-      const startSec = parseTimeToSec(payload.startTime);
-      const endSec = parseTimeToSec(payload.endTime);
-      const isInterview = payload.mode === "interview";
-      const isAsk = payload.mode === "ask";
-      const isManual = !!payload.transcript;
-
-      const meta: YouTubeMeta = {
-        url: payload.url,
-        videoId: payload.videoId,
-        startTime: startSec,
-        endTime: endSec,
-        instructions: payload.instructions || undefined,
-      };
-
-      // ---------- "Ask about video" mode ----------
-      // This mode is special: it doesn't stream a generated answer. Instead,
-      // we fetch the transcript once via /api/youtube-load, store it as the
-      // conversation's videoContext, and post a welcome message. Subsequent
-      // chat messages in this conversation automatically include the
-      // transcript as system context (see sendMessage above).
-      if (isAsk) {
-        let convoId = activeId;
-        if (!convoId) {
-          convoId = createConversation();
-        }
-
-        // User-side "loaded video" message
-        const userMsg: ChatMessage = {
-          id: genId(),
-          role: "user",
-          content:
-            `Load this YouTube video so I can ask questions about it: ${payload.url}` +
-            (startSec !== undefined || endSec !== undefined
-              ? ` (from ${payload.startTime || "0:00"} to ${
-                  payload.endTime || "end"
-                })`
-              : "") +
-            (isManual ? " (using a transcript I pasted manually)" : "") +
-            (payload.language
-              ? ` — answer my questions in ${payload.language}`
-              : ""),
-          createdAt: Date.now(),
-          youtubeMeta: meta,
-        };
-        appendMessage(convoId, userMsg);
-
-        // Assistant placeholder while we fetch the transcript
-        const assistantMsg: ChatMessage = {
-          id: genId() + "a",
-          role: "assistant",
-          content: isManual
-            ? "⏳ Loading your pasted transcript…"
-            : "⏳ Fetching transcript from YouTube…",
-          createdAt: Date.now(),
-        };
-        appendMessage(convoId, assistantMsg);
-        setStreaming(true);
-
-        try {
-          const res = await fetch("/api/youtube-load", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              url: payload.url,
-              startTime: payload.startTime,
-              endTime: payload.endTime,
-              transcript: payload.transcript,
-              language: payload.language,
-            }),
-          });
-
-          if (!res.ok) {
-            let errMsg = `Request failed: ${res.status}`;
-            let errCode: string | undefined;
-            let errMeta:
-              | { title?: string; author?: string; thumbnailUrl?: string }
-              | undefined;
-            try {
-              const errBody = await res.json();
-              if (errBody?.error) errMsg = errBody.error;
-              errCode = errBody?.code;
-              errMeta = errBody?.videoMeta;
-            } catch {
-              // ignore
-            }
-            if (errCode === "BOT_BLOCKED") {
-              // Reopen dialog so the user can paste manually
-              setYoutubeBotHint(errMsg);
-              setYoutubeOpen(true);
-              const metaLine = errMeta?.title
-                ? `**Video:** ${errMeta.title}${
-                    errMeta.author ? ` — ${errMeta.author}` : ""
-                  }\n\n`
-                : "";
-              updateMessage(
-                convoId,
-                assistantMsg.id,
-                `⚠️ **YouTube blocked the auto-fetch for this video.**\n\n` +
-                  metaLine +
-                  `Please switch to **"Paste transcript manually"** in the dialog and try again.`
-              );
-            } else {
-              updateMessage(
-                convoId,
-                assistantMsg.id,
-                `⚠️ **Error:** ${errMsg}`
-              );
-            }
-            return;
-          }
-
-          const data = (await res.json()) as {
-            title: string;
-            author: string;
-            url: string;
-            videoId: string;
-            transcript: string | null;
-            chunks: any[] | null;
-            topicIndex: string | null;
-            segmentCount: number;
-            startTime: number;
-            endTime: number;
-            rangeNote?: string;
-            isManual: boolean;
-          };
-
-          // Store the transcript (or chunks + topicIndex for long videos) as
-          // the conversation's video context so subsequent chat messages get
-          // it injected automatically. Also persist the user's chosen language
-          // so every follow-up Q&A in this conversation stays in that language.
-          const ctx: VideoContext = {
-            url: data.url,
-            videoId: data.videoId,
-            title: data.title,
-            author: data.author,
-            transcript: data.transcript ?? undefined,
-            chunks: data.chunks ?? undefined,
-            topicIndex: data.topicIndex ?? undefined,
-            loadedAt: Date.now(),
-            language: payload.language,
-          };
-          setVideoContext(convoId, ctx);
-
-          // Welcome message with clear instructions
-          const mins = Math.round(
-            (data.endTime - data.startTime) / 60
-          );
-          const isLong = !!(data.chunks && data.chunks.length > 0);
-          const transcriptDesc = isLong
-            ? `${data.segmentCount} segments · ~${mins} min · split into ${data.chunks!.length} chunks for fast retrieval`
-            : `${data.segmentCount} segments${mins > 0 ? ` · ~${mins} min` : ""}`;
-          const welcomeContent =
-            `✅ **Video loaded — ask me anything about it!**\n\n` +
-            `**Title:** ${data.title}\n` +
-            `**Channel:** ${data.author}\n` +
-            `**URL:** ${data.url}\n` +
-            `**Transcript:** ${transcriptDesc}${data.isManual ? " (manual paste)" : ""}\n` +
-            (data.rangeNote ? `**Note:** ${data.rangeNote}\n` : "") +
-            (payload.language
-              ? `**Response language:** ${payload.language} — every answer in this conversation will be in ${payload.language} (timestamps, code, and tool names stay in their original form).\n`
-              : "") +
-            (isLong
-              ? `**Long video mode:** I built a topic index in parallel and will retrieve the most relevant chunks for each question — so even a 50-hour video can be queried accurately and fast.\n`
-              : "") +
-            `\n---\n\n` +
-            `I'll answer your questions **only** based on what's in this video's transcript. ` +
-            `If you ask about something that isn't covered in the video, I'll let you know.\n\n` +
-            `**Try asking:**\n` +
-            `- "What is the main topic of this video?"\n` +
-            `- "Summarize the key points"\n` +
-            `- "What did they say about X?"\n` +
-            `- "Explain the part at [MM:SS]"\n\n` +
-            `Go ahead and type your question below 👇`;
-          updateMessage(convoId, assistantMsg.id, welcomeContent);
-        } catch (err: unknown) {
-          const message =
-            err instanceof Error ? err.message : "Something went wrong.";
-          updateMessage(
-            convoId,
-            assistantMsg.id,
-            `⚠️ **Error:** ${message}`
-          );
-        } finally {
-          setStreaming(false);
-        }
-        return;
-      }
-
-      // ---------- Summary / Interview modes (streaming) ----------
-      const langPart = payload.language
-        ? ` — respond in ${payload.language}`
-        : "";
-      let userMsgContent: string;
-      if (isInterview) {
-        const opts = payload.interviewOptions;
-        const rolePart = opts?.targetRole ? ` for a ${opts.targetRole} role` : "";
-        const countPart = opts ? `${opts.questionCount}` : "15";
-        const typePart = opts?.interviewType ? ` ${opts.interviewType}` : "";
-        const diffPart = opts?.difficulty ? ` at ${opts.difficulty} difficulty` : "";
-        userMsgContent =
-          `Generate ${countPart}${typePart} interview questions and answers${rolePart}${diffPart} from this YouTube video` +
-          (startSec !== undefined || endSec !== undefined
-            ? ` from ${payload.startTime || "0:00"} to ${
-                payload.endTime || "end"
-              }`
-            : "") +
-          (isManual ? " (using a transcript I pasted manually)" : "") +
-          (payload.instructions ? `. Instructions: ${payload.instructions}` : ".") +
-          langPart;
-      } else {
-        userMsgContent =
-          `Summarize this YouTube video` +
-          (startSec !== undefined || endSec !== undefined
-            ? ` from ${payload.startTime || "0:00"} to ${
-                payload.endTime || "end"
-              }`
-            : "") +
-          (isManual ? " (using a transcript I pasted manually)" : "") +
-          (payload.instructions ? `. Instructions: ${payload.instructions}` : ".") +
-          langPart;
-      }
-
-      const userMsg: ChatMessage = {
-        id: genId(),
-        role: "user",
-        content: userMsgContent,
-        createdAt: Date.now(),
-        youtubeMeta: meta,
-      };
-
-      const apiPayload: Record<string, unknown> = {
-        url: payload.url,
-        startTime: payload.startTime,
-        endTime: payload.endTime,
-        instructions: payload.instructions,
-        transcript: payload.transcript,
-        language: payload.language,
-      };
-      if (isInterview && payload.interviewOptions) {
-        apiPayload.difficulty = payload.interviewOptions.difficulty;
-        apiPayload.questionCount = payload.interviewOptions.questionCount;
-        apiPayload.interviewType = payload.interviewOptions.interviewType;
-        apiPayload.targetRole = payload.interviewOptions.targetRole;
-      }
-
-      const endpoint = isInterview
-        ? "/api/youtube-interview"
-        : "/api/youtube-summary";
-
-      const placeholder = isManual
-        ? isInterview
-          ? "⏳ Generating interview Q&A from your pasted transcript…"
-          : "⏳ Summarizing your pasted transcript…"
-        : isInterview
-        ? "⏳ Fetching transcript and generating interview Q&A…"
-        : "⏳ Fetching transcript and preparing summary…";
-
-      await runStream(userMsg, endpoint, apiPayload, placeholder, (botMessage) => {
-        setYoutubeBotHint(botMessage);
-        setYoutubeOpen(true);
-      });
-    },
-    [activeId, appendMessage, createConversation, runStream, setStreaming, setVideoContext, updateMessage]
-  );
 
   const handleStop = () => {
     abortRef.current?.abort();
@@ -800,66 +637,17 @@ export default function Home() {
           )}
         </div>
 
-        {/* INLINE YouTube panel — replaces ChatInput when open so the user
-            fills in URL + mode + time range + instructions all on the same
-            page, with no second modal. The panel renders above where the
-            chat input normally lives; closing the panel brings the input
-            back. */}
-        {youtubeOpen ? (
-          <YouTubeInlinePanel
-            open={youtubeOpen}
-            onClose={() => {
-              setYoutubeOpen(false);
-              setYoutubeInitialUrl(undefined);
-            }}
-            onSubmit={handleYouTube}
-            botBlockedHint={youtubeBotHint}
-            onClearHint={() => setYoutubeBotHint(null)}
-            initialUrl={youtubeInitialUrl}
-          />
-        ) : (
-          <ChatInput
-            onSubmit={sendMessage}
-            onStop={handleStop}
-            onOpenYouTube={(prefilledUrl) => {
-              setYoutubeInitialUrl(prefilledUrl);
-              setYoutubeOpen(true);
-            }}
-            isStreaming={isStreaming}
-          />
-        )}
+        {/* Chat input — always rendered. When the user pastes a YouTube URL,
+            a "Summarize video →" chip appears above the input; clicking it
+            sends the URL as a message, which sendMessage auto-routes to
+            /api/youtube-summary. No panel, no second page, no settings. */}
+        <ChatInput
+          onSubmit={sendMessage}
+          onStop={handleStop}
+          isStreaming={isStreaming}
+        />
       </div>
     </div>
   );
 }
 
-function parseTimeToSec(s: string): number | undefined {
-  // Local display-only parser. Mirrors the backend `parseTimeString` rule:
-  // a bare number means MINUTES (so "5" = 5 min = 300s), not seconds.
-  // The backend re-parses the raw string anyway, so this only affects what
-  // we store in `meta.startTime` for display in the chat bubble.
-  const trimmed = s.trim();
-  if (!trimmed) return undefined;
-
-  // Honor explicit unit suffixes (5m, 90s, 1h, 1h30m, 2h15m30s).
-  if (/[hms]/i.test(trimmed) && /^[\d\s.:hms]+$/i.test(trimmed)) {
-    const h = trimmed.match(/(\d+)\s*h/i);
-    const m = trimmed.match(/(\d+)\s*m/i);
-    const sec = trimmed.match(/(\d+)\s*s/i);
-    if (h || m || sec) {
-      let total = 0;
-      if (h) total += parseInt(h[1], 10) * 3600;
-      if (m) total += parseInt(m[1], 10) * 60;
-      if (sec) total += parseInt(sec[1], 10);
-      return total;
-    }
-  }
-
-  const parts = trimmed.split(":").map((p) => parseInt(p, 10));
-  if (parts.some((n) => isNaN(n))) return undefined;
-  if (parts.length === 1) return parts[0] * 60; // bare number = minutes
-  if (parts.length === 2) return parts[0] * 60 + parts[1]; // M:SS
-  if (parts.length === 3)
-    return parts[0] * 3600 + parts[1] * 60 + parts[2]; // H:MM:SS
-  return undefined;
-}

@@ -20,14 +20,12 @@ interface PendingAttachment {
 interface ChatInputProps {
   onSubmit: (text: string, attachments: Attachment[]) => void;
   onStop?: () => void;
-  onOpenYouTube?: (prefilledUrl?: string) => void;
   isStreaming: boolean;
 }
 
 export function ChatInput({
   onSubmit,
   onStop,
-  onOpenYouTube,
   isStreaming,
 }: ChatInputProps) {
   const [value, setValue] = useState("");
@@ -175,24 +173,27 @@ export function ChatInput({
           </div>
         )}
 
-        {/* Detected YouTube URL affordance — show a one-click "Summarize / Generate Q&A" chip */}
+        {/* Detected YouTube URL — one-click summarize, no second page / no modal. */}
         {detectedYoutubeUrl && (
           <div className="mb-2 flex items-center gap-2 rounded-lg border border-red-200 dark:border-red-800 bg-red-50/70 dark:bg-red-950/30 px-3 py-1.5">
             <Youtube className="h-3.5 w-3.5 text-red-600 dark:text-red-400 flex-shrink-0" />
             <span className="flex-1 truncate text-xs text-zinc-700 dark:text-zinc-300">
-              YouTube link detected — summarize or generate interview Q&amp;A
-              from this video?
+              YouTube link detected — click to fetch transcript &amp; summarize
+              automatically.
             </span>
             <button
               type="button"
               onClick={() => {
-                onOpenYouTube?.(detectedYoutubeUrl);
+                // Send JUST the URL as a message. page.tsx detects YouTube
+                // URLs in sendMessage and routes them to /api/youtube-summary
+                // directly — no panel, no second page, no settings to pick.
+                onSubmit(detectedYoutubeUrl, []);
                 setValue("");
               }}
               disabled={isStreaming}
-              className="flex-shrink-0 rounded-md bg-red-600 hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed px-2 py-0.5 text-[11px] font-medium text-white transition-colors"
+              className="flex-shrink-0 rounded-md bg-red-600 hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed px-2.5 py-0.5 text-[11px] font-semibold text-white transition-colors"
             >
-              Open YouTube panel →
+              Summarize video →
             </button>
             <button
               type="button"
@@ -237,23 +238,12 @@ export function ChatInput({
             <Paperclip className="h-5 w-5" />
           </button>
 
-          {/* YouTube button */}
-          <button
-            onClick={() => onOpenYouTube?.()}
-            disabled={isStreaming}
-            className="mb-2.5 flex h-9 w-9 items-center justify-center rounded-full text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-700 hover:text-red-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-            aria-label="Summarize YouTube video or generate interview Q&A"
-            title="Summarize a YouTube video or generate interview Q&A"
-          >
-            <Youtube className="h-5 w-5" />
-          </button>
-
           <Textarea
             ref={textareaRef}
             value={value}
             onChange={(e) => setValue(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Send a message, attach a file, or paste a YouTube URL…"
+            placeholder="Paste a YouTube link to summarize, or ask me anything…"
             rows={1}
             className="min-h-[52px] max-h-[200px] flex-1 resize-none border-0 bg-transparent px-2 py-3.5 text-[15px] leading-6 text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 focus-visible:outline-none focus-visible:ring-0 focus-visible:ring-offset-0"
           />

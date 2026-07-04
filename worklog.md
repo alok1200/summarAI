@@ -441,3 +441,36 @@ Stage Summary:
 - TL;DR is now scannable in 10 seconds: one bottom-line sentence, 3-5 bold bullets of concrete takeaways, and a one-line "Best for" audience note.
 - Detailed Breakdown section still covers every topic exhaustively — only the TL;DR got shorter.
 - No regressions: type-check and production build both pass.
+
+---
+Task ID: one-page-flow
+Agent: main
+Task: Remove the YouTube configuration panel entirely ("second page") and make it a one-page flow — paste URL → click send → get summary. Auto-fetch only, no manual mode option, lighter UI.
+
+Work Log:
+- Deleted `src/components/chat/YouTubeInlinePanel.tsx` — the panel with URL + mode + time range + instructions + language + interview settings is gone. No second page, no modal.
+- `src/components/chat/ChatInput.tsx`:
+  - Removed the `onOpenYouTube` prop entirely.
+  - Removed the standalone YouTube button next to the attach button.
+  - Changed the URL-detection chip: button label is now "Summarize video →" and on click it calls `onSubmit(detectedYoutubeUrl, [])` directly — sends the URL as a normal chat message. page.tsx detects the URL and routes to /api/youtube-summary.
+  - Updated placeholder text: "Paste a YouTube link to summarize, or ask me anything…"
+- `src/app/page.tsx`:
+  - Removed all panel state: `youtubeOpen`, `youtubeBotHint`, `youtubeInitialUrl`.
+  - Removed the `<YouTubeInlinePanel>` import and the swap block. `<ChatInput>` is now always rendered.
+  - Removed the entire `handleYouTube` function (~265 lines).
+  - Removed the `parseTimeToSec` helper (only used by handleYouTube).
+  - Removed the `onOpenYouTube` prop from `<ChatInput>`.
+  - Added `detectYouTubeUrl(text)` helper: matches any YouTube URL pattern (watch / youtu.be / embed / shorts / live) and returns the full URL string.
+  - Added `detectLanguage(text)` helper: matches "in <Capitalized>" pattern (e.g. "in Hindi", "in Spanish") so the user can write "summarize this in Hindi: <URL>" and the response is in Hindi. Filters out obvious false positives (JavaScript, Python, React, etc.).
+  - In `sendMessage`: if the user's text contains a YouTube URL and there are no attachments, auto-route to `/api/youtube-summary` with `url` (+ optional `instructions` from remaining text + optional `language` from "in <Lang>"). No startTime/endTime/transcript — auto-fetch only, exactly as the user requested.
+  - Updated the bot-blocked message: instead of "open the dialog and paste manually", it now says "open the video on YouTube, click '… More' → 'Show transcript', copy the transcript, paste it back here as a chat message starting with 'summarize this transcript:'". Fits the new one-page flow.
+- `src/app/api/youtube-meta/route.ts`: updated the doc comment — the panel that consumed this endpoint is gone, but the endpoint is kept for future use.
+- Verified: `npx tsc --noEmit` → 0 errors. `npx eslint` on changed files → 0 errors. `npx next build` → ✓ Compiled successfully, all 12 routes generated.
+
+Stage Summary:
+- ONE page, ONE input. User pastes a YouTube URL → a "Summarize video →" chip appears → click → summary streams in. No second page, no settings to pick, no manual/auto toggle.
+- Auto-fetch is the only mode (no "paste transcript manually" option in the UI). If YouTube blocks auto-fetch, the chat shows clear next-step instructions for pasting the transcript as a normal message.
+- Language override still works: type "summarize this in Hindi: <URL>" → response is in Hindi.
+- Optional instructions still work: type "summarize this focusing on the React parts: <URL>" → instructions field is set.
+- The YouTube button in the chat input is gone (the chip is enough for discoverability, and the placeholder mentions YouTube).
+- File size: page.tsx went from 969 lines → 653 lines (≈ -33% lighter). ChatInput.tsx went from 301 lines → 285 lines.

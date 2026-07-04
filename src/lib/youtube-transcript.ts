@@ -101,8 +101,14 @@ interface CaptionTrack {
 }
 
 /**
- * Fetch lightweight video metadata (title, author, thumbnail) via YouTube's
- * public oEmbed endpoint. NOT bot-protected.
+ * Fetch lightweight video metadata (title, author, thumbnail).
+ *
+ * Strategy A: If YOUTUBE_API_KEY is set in the environment, use the official
+ *             YouTube Data API v3 (most reliable — no bot protection).
+ * Strategy B: Fall back to YouTube's public oEmbed endpoint (no key needed,
+ *             but can fail on bot-protected / age-restricted videos).
+ *
+ * Results are cached for META_CACHE_TTL_MS to avoid redundant fetches.
  */
 export async function fetchVideoMeta(
   videoId: string
@@ -111,6 +117,55 @@ export async function fetchVideoMeta(
   if (cached && Date.now() - cached.fetchedAt < META_CACHE_TTL_MS) {
     return cached;
   }
+
+  // Strategy A: Official YouTube Data API v3 (most reliable — no bot protection).
+  // Only used if YOUTUBE_API_KEY is set in the environment.
+  const apiKey = process.env.YOUTUBE_API_KEY;
+  if (apiKey && apiKey.trim() !== "") {
+    try {
+      const url =
+        `https://www.googleapis.com/youtube/v3/videos` +
+        `?part=snippet&id=${videoId}&key=${encodeURIComponent(apiKey)}`;
+      const res = await fetch(url, {
+        headers: { "Accept-Language": "en-US,en;q=0.9" },
+      });
+      if (res.ok) {
+        const json = (await res.json()) as {
+          items?: Array<{
+            snippet?: {
+              title?: string;
+              channelTitle?: string;
+              thumbnails?: {
+                high?: { url?: string };
+                medium?: { url?: string };
+                default?: { url?: string };
+              };
+            };
+          }>;
+        };
+        const item = json.items?.[0];
+        if (item?.snippet?.title) {
+          const entry: MetaCacheEntry = {
+            title: item.snippet.title,
+            author: item.snippet.channelTitle || "Unknown",
+            thumbnailUrl:
+              item.snippet.thumbnails?.high?.url ||
+              item.snippet.thumbnails?.medium?.url ||
+              item.snippet.thumbnails?.default?.url ||
+              `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`,
+            fetchedAt: Date.now(),
+          };
+          metaCache.set(videoId, entry);
+          return entry;
+        }
+      }
+    } catch {
+      // Fall through to oEmbed strategy below.
+    }
+  }
+
+  // Strategy B: Public oEmbed endpoint (no API key needed, but can fail on
+  // bot-protected / age-restricted videos).
   try {
     const res = await fetch(
       `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`,

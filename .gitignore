@@ -31,7 +31,11 @@ yarn-error.log*
 .pnpm-debug.log*
 
 # env files (can opt-in for committing if needed)
+# .env / .env.local / .env.production hold REAL secrets — never commit them.
+# .env.example is a template with placeholders only — safe to commit so other
+# developers know which env vars the project needs.
 .env*
+!.env.example
 
 # vercel
 .vercel

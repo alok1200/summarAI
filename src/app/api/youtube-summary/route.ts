@@ -42,25 +42,34 @@ async function summarizeChunk(
   ctx: { url: string; videoTitle: string | undefined; videoChannel: string | undefined; instructions: string | undefined }
 ): Promise<string> {
   const systemPrompt =
-    `You are a helpful AI assistant that summarizes ONE segment of a longer YouTube video transcript. ` +
+    `You are an expert AI assistant that produces COMPREHENSIVE, DETAILED summaries of ONE segment of a longer YouTube video transcript. ` +
     `This segment covers ${chunk.startTimeLabel} – ${chunk.endTimeLabel} ` +
     `(chunk ${chunk.index} of ${chunk.total}). ` +
-    `Produce a focused, well-structured summary of JUST this segment with:\n` +
-    `- A 2-3 sentence overview of what's discussed in this segment\n` +
-    `- A bulleted list of the key points (each with a [MM:SS] timestamp from within this segment)\n` +
-    `- Any notable quotes or insights\n\n` +
+    `Your goal is to capture EVERY topic, sub-topic, example, demo, and insight in this segment — nothing should be lost.\n\n` +
+    `Produce a thorough, well-structured summary of JUST this segment with:\n` +
+    `- A 3-4 sentence overview that explicitly names every topic discussed in this segment\n` +
+    `- A DETAILED breakdown with a ### sub-heading for EVERY topic, sub-topic, or notable moment. Each sub-section must include:\n` +
+    `  · The [MM:SS] timestamp where it appears in this segment\n` +
+    `  · A long-form explanation (3-6+ sentences) of what is being discussed\n` +
+    `  · Any examples, demos, code, or analogies used\n` +
+    `  · Any context, motivation, reasoning, or background provided\n` +
+    `  · Any caveats, tips, gotchas, or best-practice advice\n` +
+    `  · Any names, tools, libraries, frameworks, or resources mentioned\n` +
+    `- A "Notable quotes & insights" subsection with direct quotes (with timestamps)\n\n` +
     `Use Markdown. Do not invent information that isn't in the transcript. ` +
-    `Keep it concise — under 400 words.`;
+    `Be EXHAUSTIVE — it is better to over-include than to miss a small topic. ` +
+    `Aim for 800-1500 words for a typical 5-10 minute segment.`;
 
   const userMessage =
-    `Summarize this segment of a YouTube video transcript.\n\n` +
+    `Produce a COMPREHENSIVE summary of this segment of a YouTube video transcript. ` +
+    `Cover EVERY topic in long-form detail — do not skip or compress anything.\n\n` +
     `Video URL: ${ctx.url}\n` +
     (ctx.videoTitle ? `Video title: ${ctx.videoTitle}\n` : "") +
     (ctx.videoChannel ? `Video channel: ${ctx.videoChannel}\n` : "") +
     `Segment: ${chunk.startTimeLabel} – ${chunk.endTimeLabel} (chunk ${chunk.index}/${chunk.total}, ${chunk.segmentCount} segments)\n\n` +
     (ctx.instructions ? `User instructions: ${ctx.instructions}\n\n` : "") +
     `Transcript segment:\n\n${chunk.text}\n\n` +
-    `Provide your structured summary now.`;
+    `Provide your comprehensive structured summary now.`;
 
   return await chatComplete([
     { role: "system", content: systemPrompt },
@@ -86,18 +95,40 @@ function buildReduceMessages(
   }
 ): ChatMessage[] {
   const systemPrompt =
-    `You are a helpful AI assistant producing the FINAL summary of a long YouTube video. ` +
+    `You are an expert AI assistant producing the FINAL COMPREHENSIVE summary of a long YouTube video. ` +
     `You will be given ${chunkSummaries.length} per-segment summaries (each covering a different ` +
-    `time range of the video). Your job is to synthesize them into ONE coherent, well-structured ` +
-    `summary that flows naturally. Do NOT just concatenate — reorganize and deduplicate so the ` +
-    `reader gets a clear picture of the whole video.\n\n` +
-    `Produce:\n` +
-    `1. A one-paragraph overview of the entire video\n` +
-    `2. A bulleted list of the most important key points (with [MM:SS] timestamps)\n` +
-    `3. Notable quotes or insights\n` +
-    `4. A brief "Chapter index" listing the main topics with their time ranges\n\n` +
-    `Use Markdown. Reference timestamps in [MM:SS] format. ` +
-    `Do not invent information not present in the per-segment summaries.`;
+    `time range of the video, in order). Your job is to synthesize them into ONE coherent, EXHAUSTIVE ` +
+    `summary that captures EVERY topic, sub-topic, example, demo, and insight from the entire video. ` +
+    `Reorganize and deduplicate where the same topic appears in multiple segments, but DO NOT drop any ` +
+    `content — exhaustiveness is the top priority.\n\n` +
+    `Your output MUST follow this exact structure (use Markdown):\n\n` +
+    `## TL;DR — All Key Points at a Glance\n` +
+    `A 5-8 sentence overview that explicitly names EVERY major topic, concept, technique, tool, and idea discussed ` +
+    `across the entire video. The reader should get a complete map of the video's coverage just from this section. ` +
+    `Do not be abstract — list concrete subject names.\n\n` +
+    `## Detailed Breakdown — Every Point Explained\n` +
+    `For EVERY topic, sub-topic, example, demo, or notable moment in the entire video, create a ### sub-heading ` +
+    `and write a LONG-FORM detailed explanation underneath. Group related content from different segments together ` +
+    `under the most fitting heading. Each sub-section MUST include:\n` +
+    `- The [MM:SS] timestamp(s) where it appears in the video\n` +
+    `- A thorough explanation of WHAT is being discussed (3-6+ sentences minimum)\n` +
+    `- Any examples, demos, code snippets, or analogies the speaker uses\n` +
+    `- Any context, reasoning, motivation, or background the speaker provides\n` +
+    `- Any caveats, tips, gotchas, or best-practice advice mentioned\n` +
+    `- Any names, tools, libraries, frameworks, URLs, or resources referenced\n\n` +
+    `Cover EVERY small topic — even brief mentions or quick tips deserve their own entry. ` +
+    `For a long video, aim for 30-100+ distinct sub-sections. It is far better to over-include than to miss something.\n\n` +
+    `## Notable Quotes & Insights\n` +
+    `Direct quotes (with timestamps) and any particularly insightful or counterintuitive points the speaker makes ` +
+    `anywhere in the video.\n\n` +
+    `## Chapter Index\n` +
+    `A compact list of the main sections of the video with their time ranges, so the reader can jump to a specific part.\n\n` +
+    `STRICT RULES:\n` +
+    `- Do NOT invent information not present in the per-segment summaries.\n` +
+    `- Do NOT be concise at the cost of completeness — exhaustiveness is the priority.\n` +
+    `- Always reference timestamps in [MM:SS] format.\n` +
+    `- When the same topic appears in multiple segments, MERGE the details under one heading (don't repeat).\n` +
+    `- Use Markdown headings, bold, lists, and code blocks for clarity.`;
 
   const segmentsDescription = chunkSummaries
     .map((s, i) => {
@@ -107,7 +138,8 @@ function buildReduceMessages(
     .join("\n\n---\n\n");
 
   const userMessage =
-    `Produce the final unified summary of this YouTube video.\n\n` +
+    `Produce the FINAL COMPREHENSIVE unified summary of this YouTube video. ` +
+    `Cover EVERY topic from EVERY segment in long-form detail — do not skip, compress, or omit anything.\n\n` +
     `Video URL: ${ctx.url}\n` +
     (ctx.videoTitle ? `Video title: ${ctx.videoTitle}\n` : "") +
     (ctx.videoChannel ? `Video channel: ${ctx.videoChannel}\n` : "") +
@@ -115,7 +147,8 @@ function buildReduceMessages(
     `(${ctx.totalSegments} segments across ${chunks.length} chunks)\n\n` +
     (ctx.instructions ? `User instructions: ${ctx.instructions}\n\n` : "") +
     `Per-segment summaries:\n\n${segmentsDescription}\n\n` +
-    `Please provide the final unified summary now.`;
+    `Please provide the final comprehensive unified summary now. Remember: brief TL;DR covering ALL points, ` +
+    `then DETAILED long-form coverage of EVERY single topic across all segments.`;
 
   return [
     { role: "system", content: systemPrompt },
@@ -247,14 +280,37 @@ export async function POST(req: NextRequest) {
         .join("\n");
 
       const systemPrompt =
-        "You are a helpful AI assistant that summarizes YouTube video transcripts. " +
-        "Produce a clear, well-structured summary with: a one-paragraph overview, " +
-        "the key points as a bulleted list (referencing timestamps where useful), " +
-        "and any notable quotes or insights. Use Markdown. " +
-        "Do not invent information that isn't in the transcript.";
+        "You are an expert AI assistant that produces COMPREHENSIVE, EXHAUSTIVE summaries of YouTube video transcripts. " +
+        "Your goal is to cover EVERY topic, sub-topic, example, demo, and insight mentioned in the video — nothing should be left out.\n\n" +
+        "Your output MUST follow this exact structure (use Markdown):\n\n" +
+        "## TL;DR — All Key Points at a Glance\n" +
+        "A 4-6 sentence overview that names EVERY major topic discussed in the video. " +
+        "Don't summarize abstractly — explicitly list every subject, technique, concept, tool, or idea mentioned, " +
+        "so the reader gets a complete map of what the video covers just from this section.\n\n" +
+        "## Detailed Breakdown — Every Point Explained\n" +
+        "For EVERY topic, sub-topic, example, or notable moment in the video, create a ### sub-heading and write a LONG-FORM " +
+        "detailed explanation underneath. Each sub-section MUST include:\n" +
+        "- The [MM:SS] timestamp where it appears in the video\n" +
+        "- A thorough explanation of WHAT is being discussed (not just a one-liner — write 3-6 sentences minimum per point)\n" +
+        "- Any examples, demos, code snippets, or analogies the speaker uses\n" +
+        "- Any context, reasoning, motivation, or background the speaker provides\n" +
+        "- Any caveats, tips, gotchas, or best-practice advice mentioned\n" +
+        "- Any names, tools, libraries, frameworks, URLs, or resources referenced\n\n" +
+        "Cover EVERY small topic — even minor asides, brief mentions, or quick tips deserve their own entry. " +
+        "It is better to over-include than to miss something. Aim for 15-40 distinct sub-sections for a typical 10-30 minute video.\n\n" +
+        "## Notable Quotes & Insights\n" +
+        "Direct quotes (with timestamps) and any particularly insightful or counterintuitive points the speaker makes.\n\n" +
+        "## Chapter Index\n" +
+        "A compact list of the main sections of the video with their time ranges, so the reader can jump to a specific part.\n\n" +
+        "STRICT RULES:\n" +
+        "- Do NOT invent information that isn't in the transcript.\n" +
+        "- Do NOT be concise at the cost of completeness — exhaustiveness is the priority.\n" +
+        "- Always reference timestamps in [MM:SS] format so the user can find the source.\n" +
+        "- Use Markdown headings, bold, lists, and code blocks for clarity.";
 
       const userMessage =
-        `Please summarize the following YouTube video transcript.\n\n` +
+        `Please produce a COMPREHENSIVE summary of the following YouTube video transcript. ` +
+        `Cover EVERY topic and sub-topic in long-form detail — do not skip or compress anything.\n\n` +
         `Video URL: ${url}\n` +
         (videoMeta
           ? `Video title: ${videoMeta.title}\nVideo channel: ${videoMeta.author}\n`
@@ -266,7 +322,7 @@ export async function POST(req: NextRequest) {
           ? `Additional instructions from the user: ${instructions}\n\n`
           : "") +
         `Transcript (with timestamps):\n\n${transcriptText}\n\n` +
-        `Please provide your structured summary now.`;
+        `Provide your comprehensive structured summary now. Remember: brief TL;DR covering ALL points, then DETAILED long-form coverage of EVERY single topic.`;
 
       const llmStream = await chatCompleteStream([
         { role: "system", content: systemPrompt },

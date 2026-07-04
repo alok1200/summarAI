@@ -1,0 +1,728 @@
+     1→     1→"use client";
+     2→     2→
+     3→     3→import { useState, useEffect } from "react";
+     4→     4→import { Input } from "@/components/ui/input";
+     5→     5→import { Textarea } from "@/components/ui/textarea";
+     6→     6→import { Button } from "@/components/ui/button";
+     7→     7→import { Label } from "@/components/ui/label";
+     8→     8→import {
+     9→     9→  Select,
+    10→    10→  SelectContent,
+    11→    11→  SelectItem,
+    12→    12→  SelectTrigger,
+    13→    13→  SelectValue,
+    14→    14→} from "@/components/ui/select";
+    15→    15→import {
+    16→    16→  Youtube,
+    17→    17→  ClipboardPaste,
+    18→    18→  AlertCircle,
+    19→    19→  GraduationCap,
+    20→    20→  MessageCircleQuestion,
+    21→    21→  Loader2,
+    22→    22→  X,
+    23→    23→  Sparkles,
+    24→    24→} from "lucide-react";
+    25→    25→
+    26→    26→/**
+    27→    27→ * Lightweight video preview card shown inside the panel as soon as the user
+    28→    28→ * pastes a valid URL. Fetches title + author + thumbnail from our own
+    29→    29→ * /api/youtube-meta endpoint (which proxies YouTube's public oEmbed API).
+    30→    30→ *
+    31→    31→ * This gives the user visual confirmation that we picked up the right video
+    32→    32→ * BEFORE they click Submit — avoiding wasted time on the wrong link.
+    33→    33→ */
+    34→    34→function VideoPreview({ videoId }: { videoId: string }) {
+    35→    35→  // Start in the "loading" state. Because the parent renders this component
+    36→    36→  // with `key={videoId}`, a new videoId causes React to remount this
+    37→    37→  // component fresh — so the initial state is always "loading" for each new
+    38→    38→  // video, without needing a synchronous setState inside useEffect.
+    39→    39→  const [state, setState] = useState<
+    40→    40→    | { kind: "loading" }
+    41→    41→    | { kind: "ok"; title: string; author: string; thumbnailUrl: string }
+    42→    42→    | { kind: "error"; message: string }
+    43→    43→  >({ kind: "loading" });
+    44→    44→
+    45→    45→  useEffect(() => {
+    46→    46→    let cancelled = false;
+    47→    47→
+    48→    48→    async function fetchMeta() {
+    49→    49→      try {
+    50→    50→        const res = await fetch(`/api/youtube-meta?videoId=${videoId}`);
+    51→    51→        const data = await res.json();
+    52→    52→        if (cancelled) return;
+    53→    53→        if (!res.ok || !data.ok) {
+    54→    54→          setState({
+    55→    55→            kind: "error",
+    56→    56→            message:
+    57→    57→              data?.error ?? "Couldn't fetch metadata for this video.",
+    58→    58→          });
+    59→    59→          return;
+    60→    60→        }
+    61→    61→        setState({
+    62→    62→          kind: "ok",
+    63→    63→          title: data.title,
+    64→    64→          author: data.author,
+    65→    65→          thumbnailUrl: data.thumbnailUrl,
+    66→    66→        });
+    67→    67→      } catch (e) {
+    68→    68→        if (cancelled) return;
+    69→    69→        setState({
+    70→    70→          kind: "error",
+    71→    71→          message: "Network error while fetching video metadata.",
+    72→    72→        });
+    73→    73→      }
+    74→    74→    }
+    75→    75→
+    76→    76→    fetchMeta();
+    77→    77→    return () => {
+    78→    78→      cancelled = true;
+    79→    79→    };
+    80→    80→  }, [videoId]);
+    81→    81→
+    82→    82→  if (state.kind === "loading") {
+    83→    83→    return (
+    84→    84→      <div className="flex items-center gap-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-900 px-3 py-2 text-xs text-zinc-500">
+    85→    85→        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+    86→    86→        Fetching video info…
+    87→    87→      </div>
+    88→    88→    );
+    89→    89→  }
+    90→    90→
+    91→    91→  if (state.kind === "error") {
+    92→    92→    return (
+    93→    93→      <div className="flex items-center gap-2 rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30 px-3 py-2 text-[11px] text-amber-700 dark:text-amber-300">
+    94→    94→        <AlertCircle className="h-3.5 w-3.5 flex-shrink-0" />
+    95→    95→        {state.message} You can still proceed — we&apos;ll fetch the transcript
+    96→    96→        when you click Submit.
+    97→    97→      </div>
+    98→    98→    );
+    99→    99→  }
+   100→   100→
+   101→   101→  return (
+   102→   102→    <a
+   103→   103→      href={`https://www.youtube.com/watch?v=${videoId}`}
+   104→   104→      target="_blank"
+   105→   105→      rel="noopener noreferrer"
+   106→   106→      className="group flex gap-3 overflow-hidden rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 p-2 hover:border-zinc-300 dark:hover:border-zinc-600 transition-colors"
+   107→   107→    >
+   108→   108→      <div className="relative h-14 w-24 flex-shrink-0 overflow-hidden rounded bg-zinc-100 dark:bg-zinc-800">
+   109→   109→        <img
+   110→   110→          src={state.thumbnailUrl}
+   111→   111→          alt={state.title}
+   112→   112→          className="h-full w-full object-cover"
+   113→   113→          onError={(e) => {
+   114→   114→            (e.currentTarget as HTMLImageElement).style.display = "none";
+   115→   115→          }}
+   116→   116→        />
+   117→   117→        <div className="absolute inset-0 flex items-center justify-center bg-black/30 group-hover:bg-black/40 transition-colors">
+   118→   118→          <Youtube className="h-5 w-5 text-white" />
+   119→   119→        </div>
+   120→   120→      </div>
+   121→   121→      <div className="flex min-w-0 flex-1 flex-col justify-center">
+   122→   122→        <p className="line-clamp-2 text-xs font-semibold text-zinc-800 dark:text-zinc-100 leading-snug">
+   123→   123→          {state.title}
+   124→   124→        </p>
+   125→   125→        <p className="mt-0.5 truncate text-[11px] text-zinc-500 dark:text-zinc-400">
+   126→   126→          {state.author}
+   127→   127→        </p>
+   128→   128→      </div>
+   129→   129→    </a>
+   130→   130→  );
+   131→   131→}
+   132→   132→
+   133→   133→export type YouTubeMode = "summary" | "interview" | "ask";
+   134→   134→
+   135→   135→export interface InterviewOptions {
+   136→   136→  difficulty: "beginner" | "intermediate" | "advanced" | "mixed";
+   137→   137→  questionCount: number;
+   138→   138→  interviewType: "technical" | "behavioral" | "mixed";
+   139→   139→  targetRole?: string;
+   140→   140→}
+   141→   141→
+   142→   142→export interface YouTubeSubmitPayload {
+   143→   143→  url: string;
+   144→   144→  startTime: string;
+   145→   145→  endTime: string;
+   146→   146→  instructions: string;
+   147→   147→  videoId: string;
+   148→   148→  /** When set, the request should bypass fetching and use this transcript instead. */
+   149→   149→  transcript?: string;
+   150→   150→  /** Which mode the user picked — drives the endpoint on the parent. */
+   151→   151→  mode: YouTubeMode;
+   152→   152→  /** When mode === "interview", these options are sent along. */
+   153→   153→  interviewOptions?: InterviewOptions;
+   154→   154→  /**
+   155→   155→   * Optional: language for the AI response (e.g. "Hindi", "Spanish",
+   156→   156→   * "Japanese", "French"). When empty, the AI uses its default (English).
+   157→   157→   * Honored across summary, interview Q&A, ask-about-video, and chat.
+   158→   158→   */
+   159→   159→  language?: string;
+   160→   160→}
+   161→   161→
+   162→   162→interface YouTubeInlinePanelProps {
+   163→   163→  open: boolean;
+   164→   164→  onClose: () => void;
+   165→   165→  onSubmit: (payload: YouTubeSubmitPayload) => void;
+   166→   166→  /** When set, automatically switches to manual mode and shows this hint. */
+   167→   167→  botBlockedHint?: string | null;
+   168→   168→  /** Once the user dismisses the hint, the parent should clear it. */
+   169→   169→  onClearHint?: () => void;
+   170→   170→  /** Optional pre-filled URL (e.g. when the user pasted a YouTube link in the
+   171→   171→   * main chat input and clicked the "Open YouTube panel" chip). */
+   172→   172→  initialUrl?: string;
+   173→   173→}
+   174→   174→
+   175→   175→function extractVideoId(url: string): string | null {
+   176→   176→  const patterns: RegExp[] = [
+   177→   177→    /(?:youtube\.com\/watch\?v=)([A-Za-z0-9_-]{11})/,
+   178→   178→    /(?:youtu\.be\/)([A-Za-z0-9_-]{11})/,
+   179→   179→    /(?:youtube\.com\/embed\/)([A-Za-z0-9_-]{11})/,
+   180→   180→    /(?:youtube\.com\/shorts\/)([A-Za-z0-9_-]{11})/,
+   181→   181→    /(?:youtube\.com\/live\/)([A-Za-z0-9_-]{11})/,
+   182→   182→  ];
+   183→   183→  for (const p of patterns) {
+   184→   184→    const m = url.match(p);
+   185→   185→    if (m) return m[1];
+   186→   186→  }
+   187→   187→  if (/^[A-Za-z0-9_-]{11}$/.test(url.trim())) return url.trim();
+   188→   188→  return null;
+   189→   189→}
+   190→   190→
+   191→   191→/**
+   192→   192→ * INLINE YouTube configuration panel — replaces the old modal dialog.
+   193→   193→ *
+   194→   194→ * Renders ABOVE the chat input in the same column, on the same page. User
+   195→   195→ * fills in URL + mode + time range + instructions + (optional) interview
+   196→   196→ * settings all in one place; there is NO second modal/page.
+   197→   197→ *
+   198→   198→ * The panel is intentionally tall but compact: every field is visible at
+   199→   199→ * once, no tabs/wizards. The parent component decides whether to render
+   200→   200→ * the ChatInput or this panel (they swap), so the user never sees both
+   201→   201→ * at the same time.
+   202→   202→ */
+   203→   203→export function YouTubeInlinePanel({
+   204→   204→  open,
+   205→   205→  onClose,
+   206→   206→  onSubmit,
+   207→   207→  botBlockedHint,
+   208→   208→  onClearHint,
+   209→   209→  initialUrl,
+   210→   210→}: YouTubeInlinePanelProps) {
+   211→   211→  const [url, setUrl] = useState("");
+   212→   212→  const [startTime, setStartTime] = useState("");
+   213→   213→  const [endTime, setEndTime] = useState("");
+   214→   214→  const [instructions, setInstructions] = useState("");
+   215→   215→  const [language, setLanguage] = useState("");
+   216→   216→  const [touched, setTouched] = useState(false);
+   217→   217→  const [mode, setMode] = useState<YouTubeMode>("summary");
+   218→   218→  const [fetchMode, setFetchMode] = useState<"auto" | "manual">("auto");
+   219→   219→  const [transcript, setTranscript] = useState("");
+   220→   220→
+   221→   221→  // When `initialUrl` is set (e.g. user clicked "Open YouTube panel →" from
+   222→   222→  // the URL detection chip in the main chat input), pre-fill the URL field
+   223→   223→  // when the panel opens.
+   224→   224→  const [prevInitialUrl, setPrevInitialUrl] = useState<string | undefined>(
+   225→   225→    initialUrl
+   226→   226→  );
+   227→   227→  if (initialUrl !== prevInitialUrl) {
+   228→   228→    setPrevInitialUrl(initialUrl);
+   229→   229→    if (initialUrl && open) {
+   230→   230→      setUrl(initialUrl);
+   231→   231→    }
+   232→   232→  }
+   233→   233→
+   234→   234→  // Interview-mode options
+   235→   235→  const [difficulty, setDifficulty] =
+   236→   236→    useState<InterviewOptions["difficulty"]>("intermediate");
+   237→   237→  const [questionCount, setQuestionCount] = useState<number>(15);
+   238→   238→  const [interviewType, setInterviewType] =
+   239→   239→    useState<InterviewOptions["interviewType"]>("technical");
+   240→   240→  const [targetRole, setTargetRole] = useState<string>("");
+   241→   241→
+   242→   242→  // Remember the last-submitted values so that, when the panel auto-reopens
+   243→   243→  // after a bot block, we can repopulate the URL/instructions/time range
+   244→   244→  // instead of forcing the user to type them again.
+   245→   245→  const [lastPayload, setLastPayload] = useState<YouTubeSubmitPayload | null>(
+   246→   246→    null
+   247→   247→  );
+   248→   248→  const [prevHint, setPrevHint] = useState<string | null | undefined>(
+   249→   249→    botBlockedHint
+   250→   250→  );
+   251→   251→
+   252→   252→  if (botBlockedHint !== prevHint) {
+   253→   253→    setPrevHint(botBlockedHint);
+   254→   254→    if (botBlockedHint && lastPayload) {
+   255→   255→      setUrl(lastPayload.url);
+   256→   256→      setStartTime(lastPayload.startTime);
+   257→   257→      setEndTime(lastPayload.endTime);
+   258→   258→      setInstructions(lastPayload.instructions);
+   259→   259→      setLanguage(lastPayload.language ?? "");
+   260→   260→      setMode(lastPayload.mode);
+   261→   261→      if (lastPayload.interviewOptions) {
+   262→   262→        setDifficulty(lastPayload.interviewOptions.difficulty);
+   263→   263→        setQuestionCount(lastPayload.interviewOptions.questionCount);
+   264→   264→        setInterviewType(lastPayload.interviewOptions.interviewType);
+   265→   265→        setTargetRole(lastPayload.interviewOptions.targetRole ?? "");
+   266→   266→      }
+   267→   267→      setFetchMode("manual");
+   268→   268→      setTranscript("");
+   269→   269→    }
+   270→   270→  }
+   271→   271→
+   272→   272→  const videoId = extractVideoId(url);
+   273→   273→  const urlError = touched && url && !videoId ? "Enter a valid YouTube URL" : "";
+   274→   274→
+   275→   275→  const showHint = !!botBlockedHint;
+   276→   276→  const effectiveFetchMode = showHint ? "manual" : fetchMode;
+   277→   277→
+   278→   278→  const canSubmit =
+   279→   279→    !!videoId &&
+   280→   280→    (effectiveFetchMode === "auto" || transcript.trim().length > 0);
+   281→   281→
+   282→   282→  const handleSubmit = () => {
+   283→   283→    setTouched(true);
+   284→   284→    if (!videoId) return;
+   285→   285→    if (effectiveFetchMode === "manual" && !transcript.trim()) return;
+   286→   286→    const payload: YouTubeSubmitPayload = {
+   287→   287→      url: url.trim(),
+   288→   288→      startTime: startTime.trim(),
+   289→   289→      endTime: endTime.trim(),
+   290→   290→      instructions: instructions.trim(),
+   291→   291→      videoId,
+   292→   292→      transcript:
+   293→   293→        effectiveFetchMode === "manual" ? transcript.trim() : undefined,
+   294→   294→      mode,
+   295→   295→      interviewOptions:
+   296→   296→        mode === "interview"
+   297→   297→          ? {
+   298→   298→              difficulty,
+   299→   299→              questionCount,
+   300→   300→              interviewType,
+   301→   301→              targetRole: targetRole.trim() || undefined,
+   302→   302→            }
+   303→   303→          : undefined,
+   304→   304→      language: language.trim() || undefined,
+   305→   305→    };
+   306→   306→    setLastPayload(payload);
+   307→   307→    onSubmit(payload);
+   308→   308→    // Reset
+   309→   309→    setUrl("");
+   310→   310→    setStartTime("");
+   311→   311→    setEndTime("");
+   312→   312→    setInstructions("");
+   313→   313→    setLanguage("");
+   314→   314→    setTranscript("");
+   315→   315→    setTouched(false);
+   316→   316→    setFetchMode("auto");
+   317→   317→    onClearHint?.();
+   318→   318→    onClose();
+   319→   319→  };
+   320→   320→
+   321→   321→  const handleClose = () => {
+   322→   322→    onClearHint?.();
+   323→   323→    onClose();
+   324→   324→  };
+   325→   325→
+   326→   326→  // Title / description / submit label depend on mode
+   327→   327→  const titleText =
+   328→   328→    mode === "interview"
+   329→   329→      ? "Interview Q&A from a YouTube video"
+   330→   330→      : mode === "ask"
+   331→   331→      ? "Ask questions about a YouTube video"
+   332→   332→      : "Summarize a YouTube video";
+   333→   333→
+   334→   334→  const descriptionText =
+   335→   335→    mode === "interview"
+   336→   336→      ? "Paste a YouTube URL and optionally pick a time range. We'll fetch the transcript and generate interview-style questions and answers from it."
+   337→   337→      : mode === "ask"
+   338→   338→      ? "Paste a YouTube URL. We'll load the transcript into this conversation so you can ask any question about the video. If you ask about something not in the video, the assistant will tell you so."
+   339→   339→      : "Paste a YouTube URL and optionally pick a time range. We'll fetch the transcript and summarize the selected part for you.";
+   340→   340→
+   341→   341→  const submitButtonLabel =
+   342→   342→    effectiveFetchMode === "manual"
+   343→   343→      ? mode === "interview"
+   344→   344→        ? "Generate Q&A from pasted transcript"
+   345→   345→        : mode === "ask"
+   346→   346→        ? "Load pasted transcript for Q&A"
+   347→   347→        : "Summarize pasted transcript"
+   348→   348→      : mode === "interview"
+   349→   349→      ? "Generate Interview Q&A"
+   350→   350→      : mode === "ask"
+   351→   351→      ? "Load video for Q&A"
+   352→   352→      : "Summarize";
+   353→   353→
+   354→   354→  if (!open) return null;
+   355→   355→
+   356→   356→  return (
+   357→   357→    <div className="px-4 pb-2 pt-2 md:px-8">
+   358→   358→      <div className="mx-auto max-w-3xl">
+   359→   359→        <div className="rounded-2xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 shadow-sm overflow-hidden">
+   360→   360→          {/* Header bar */}
+   361→   361→          <div className="flex items-center justify-between border-b border-zinc-200 dark:border-zinc-800 bg-gradient-to-r from-red-50 to-amber-50 dark:from-red-950/30 dark:to-amber-950/30 px-4 py-3">
+   362→   362→            <div className="flex items-center gap-2 min-w-0">
+   363→   363→              <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md bg-red-600 text-white">
+   364→   364→                <Youtube className="h-4 w-4" />
+   365→   365→              </div>
+   366→   366→              <div className="min-w-0">
+   367→   367→                <p className="text-sm font-semibold text-zinc-800 dark:text-zinc-100 truncate flex items-center gap-1.5">
+   368→   368→                  {titleText}
+   369→   369→                </p>
+   370→   370→                <p className="text-[11px] text-zinc-500 dark:text-zinc-400 truncate">
+   371→   371→                  {descriptionText}
+   372→   372→                </p>
+   373→   373→              </div>
+   374→   374→            </div>
+   375→   375→            <button
+   376→   376→              type="button"
+   377→   377→              onClick={handleClose}
+   378→   378→              className="flex-shrink-0 ml-2 rounded-full p-1.5 text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-white/60 dark:hover:bg-zinc-800/60 transition-colors"
+   379→   379→              aria-label="Close YouTube panel"
+   380→   380→              title="Close — back to chat"
+   381→   381→            >
+   382→   382→              <X className="h-4 w-4" />
+   383→   383→            </button>
+   384→   384→          </div>
+   385→   385→
+   386→   386→          {/* Scrollable body */}
+   387→   387→          <div className="max-h-[calc(100vh-220px)] overflow-y-auto px-4 py-3 space-y-4">
+   388→   388→            {showHint && (
+   389→   389→              <div className="flex gap-2 rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 px-3 py-2.5 text-xs text-amber-800 dark:text-amber-200">
+   390→   390→                <AlertCircle className="h-4 w-4 flex-shrink-0 mt-0.5" />
+   391→   391→                <div className="flex-1">
+   392→   392→                  <p className="font-medium mb-0.5">
+   393→   393→                    YouTube blocked the auto-fetch for this video.
+   394→   394→                  </p>
+   395→   395→                  <p className="mb-2">{botBlockedHint}</p>
+   396→   396→                  <p className="mb-2">
+   397→   397→                    We&apos;ve switched to <strong>Manual mode</strong>. Use
+   398→   398→                    the button below to open the video on YouTube, then click
+   399→   399→                    the &quot;… More&quot; button below the video and choose
+   400→   400→                    <strong> Show transcript</strong>. Copy the transcript
+   401→   401→                    text and paste it into the box below.
+   402→   402→                  </p>
+   403→   403→                  {videoId && (
+   404→   404→                    <a
+   405→   405→                      href={`https://www.youtube.com/watch?v=${videoId}`}
+   406→   406→                      target="_blank"
+   407→   407→                      rel="noopener noreferrer"
+   408→   408→                      className="inline-flex items-center gap-1.5 rounded-md bg-amber-600 hover:bg-amber-700 text-white px-2.5 py-1 text-[11px] font-medium transition-colors"
+   409→   409→                    >
+   410→   410→                      <Youtube className="h-3 w-3" />
+   411→   411→                      Open video on YouTube
+   412→   412→                    </a>
+   413→   413→                  )}
+   414→   414→                </div>
+   415→   415→              </div>
+   416→   416→            )}
+   417→   417→
+   418→   418→            {/* Mode selector: Summary | Interview Q&A | Ask about video */}
+   419→   419→            <div className="flex gap-1 rounded-lg bg-zinc-100 dark:bg-zinc-800 p-1">
+   420→   420→              <button
+   421→   421→                type="button"
+   422→   422→                onClick={() => setMode("summary")}
+   423→   423→                className={`flex-1 rounded-md py-1.5 text-[11px] font-medium transition-colors ${
+   424→   424→                  mode === "summary"
+   425→   425→                    ? "bg-white dark:bg-zinc-950 text-zinc-900 dark:text-white shadow-sm"
+   426→   426→                    : "text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-300"
+   427→   427→                }`}
+   428→   428→              >
+   429→   429→                <Youtube className="inline h-3 w-3 mr-0.5" />
+   430→   430→                Summary
+   431→   431→              </button>
+   432→   432→              <button
+   433→   433→                type="button"
+   434→   434→                onClick={() => setMode("interview")}
+   435→   435→                className={`flex-1 rounded-md py-1.5 text-[11px] font-medium transition-colors ${
+   436→   436→                  mode === "interview"
+   437→   437→                    ? "bg-white dark:bg-zinc-950 text-zinc-900 dark:text-white shadow-sm"
+   438→   438→                    : "text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-300"
+   439→   439→                }`}
+   440→   440→              >
+   441→   441→                <GraduationCap className="inline h-3 w-3 mr-0.5" />
+   442→   442→                Interview Q&amp;A
+   443→   443→              </button>
+   444→   444→              <button
+   445→   445→                type="button"
+   446→   446→                onClick={() => setMode("ask")}
+   447→   447→                className={`flex-1 rounded-md py-1.5 text-[11px] font-medium transition-colors ${
+   448→   448→                  mode === "ask"
+   449→   449→                    ? "bg-white dark:bg-zinc-950 text-zinc-900 dark:text-white shadow-sm"
+   450→   450→                    : "text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-300"
+   451→   451→                }`}
+   452→   452→              >
+   453→   453→                <MessageCircleQuestion className="inline h-3 w-3 mr-0.5" />
+   454→   454→                Ask about video
+   455→   455→              </button>
+   456→   456→            </div>
+   457→   457→
+   458→   458→            {/* URL input + preview */}
+   459→   459→            <div className="space-y-1.5">
+   460→   460→              <Label htmlFor="yt-url">YouTube URL *</Label>
+   461→   461→              <Input
+   462→   462→                id="yt-url"
+   463→   463→                autoFocus
+   464→   464→                placeholder="https://www.youtube.com/watch?v=…"
+   465→   465→                value={url}
+   466→   466→                onChange={(e) => setUrl(e.target.value)}
+   467→   467→                onBlur={() => setTouched(true)}
+   468→   468→              />
+   469→   469→              {urlError && (
+   470→   470→                <p className="text-xs text-red-500">{urlError}</p>
+   471→   471→              )}
+   472→   472→              {videoId && (
+   473→   473→                <>
+   474→   474→                  <p className="text-xs text-emerald-600 dark:text-emerald-400">
+   475→   475→                    ✓ Detected video ID:{" "}
+   476→   476→                    <code className="font-mono">{videoId}</code>
+   477→   477→                  </p>
+   478→   478→                  <VideoPreview key={videoId} videoId={videoId} />
+   479→   479→                </>
+   480→   480→              )}
+   481→   481→            </div>
+   482→   482→
+   483→   483→            {/* Response language (optional). Empty = default English. */}
+   484→   484→            <div className="space-y-1.5">
+   485→   485→              <Label htmlFor="yt-language">
+   486→   486→                Response language (optional)
+   487→   487→              </Label>
+   488→   488→              <Input
+   489→   489→                id="yt-language"
+   490→   490→                placeholder="e.g. Hindi, Spanish, Japanese, French (empty = English)"
+   491→   491→                value={language}
+   492→   492→                onChange={(e) => setLanguage(e.target.value)}
+   493→   493→              />
+   494→   494→              <p className="text-[11px] text-zinc-500">
+   495→   495→                Leave empty for the default (English). If you type a language,
+   496→   496→                the entire summary / Q&amp;A / chat answer will be written in
+   497→   497→                that language. Timestamps, code, and tool names stay in their
+   498→   498→                original form.
+   499→   499→              </p>
+   500→   500→            </div>
+   501→   501→
+   502→   502→            {/* Interview-mode options */}
+   503→   503→            {mode === "interview" && (
+   504→   504→              <div className="space-y-3 rounded-lg border border-zinc-200 dark:border-zinc-700 p-3 bg-zinc-50/50 dark:bg-zinc-900/30">
+   505→   505→                <p className="text-xs font-semibold text-zinc-700 dark:text-zinc-300 uppercase tracking-wide">
+   506→   506→                  Interview settings
+   507→   507→                </p>
+   508→   508→
+   509→   509→                <div className="grid grid-cols-2 gap-3">
+   510→   510→                  <div className="space-y-1.5">
+   511→   511→                    <Label htmlFor="yt-difficulty" className="text-xs">
+   512→   512→                      Difficulty
+   513→   513→                    </Label>
+   514→   514→                    <Select
+   515→   515→                      value={difficulty}
+   516→   516→                      onValueChange={(v) =>
+   517→   517→                        setDifficulty(v as InterviewOptions["difficulty"])
+   518→   518→                      }
+   519→   519→                    >
+   520→   520→                      <SelectTrigger id="yt-difficulty" className="w-full">
+   521→   521→                        <SelectValue />
+   522→   522→                      </SelectTrigger>
+   523→   523→                      <SelectContent>
+   524→   524→                        <SelectItem value="beginner">Beginner</SelectItem>
+   525→   525→                        <SelectItem value="intermediate">Intermediate</SelectItem>
+   526→   526→                        <SelectItem value="advanced">Advanced</SelectItem>
+   527→   527→                        <SelectItem value="mixed">Mixed (all levels)</SelectItem>
+   528→   528→                      </SelectContent>
+   529→   529→                    </Select>
+   530→   530→                  </div>
+   531→   531→
+   532→   532→                  <div className="space-y-1.5">
+   533→   533→                    <Label htmlFor="yt-type" className="text-xs">
+   534→   534→                      Interview type
+   535→   535→                    </Label>
+   536→   536→                    <Select
+   537→   537→                      value={interviewType}
+   538→   538→                      onValueChange={(v) =>
+   539→   539→                        setInterviewType(v as InterviewOptions["interviewType"])
+   540→   540→                      }
+   541→   541→                    >
+   542→   542→                      <SelectTrigger id="yt-type" className="w-full">
+   543→   543→                        <SelectValue />
+   544→   544→                      </SelectTrigger>
+   545→   545→                      <SelectContent>
+   546→   546→                        <SelectItem value="technical">Technical</SelectItem>
+   547→   547→                        <SelectItem value="behavioral">Behavioral</SelectItem>
+   548→   548→                        <SelectItem value="mixed">Mixed</SelectItem>
+   549→   549→                      </SelectContent>
+   550→   550→                    </Select>
+   551→   551→                  </div>
+   552→   552→                </div>
+   553→   553→
+   554→   554→                <div className="grid grid-cols-2 gap-3">
+   555→   555→                  <div className="space-y-1.5">
+   556→   556→                    <Label htmlFor="yt-count" className="text-xs">
+   557→   557→                      Number of questions
+   558→   558→                    </Label>
+   559→   559→                    <Select
+   560→   560→                      value={String(questionCount)}
+   561→   561→                      onValueChange={(v) => setQuestionCount(parseInt(v, 10))}
+   562→   562→                    >
+   563→   563→                      <SelectTrigger id="yt-count" className="w-full">
+   564→   564→                        <SelectValue />
+   565→   565→                      </SelectTrigger>
+   566→   566→                      <SelectContent>
+   567→   567→                        {[5, 10, 15, 20, 25, 30].map((n) => (
+   568→   568→                          <SelectItem key={n} value={String(n)}>
+   569→   569→                            {n} questions
+   570→   570→                          </SelectItem>
+   571→   571→                        ))}
+   572→   572→                      </SelectContent>
+   573→   573→                    </Select>
+   574→   574→                  </div>
+   575→   575→
+   576→   576→                  <div className="space-y-1.5">
+   577→   577→                    <Label htmlFor="yt-role" className="text-xs">
+   578→   578→                      Target role (optional)
+   579→   579→                    </Label>
+   580→   580→                    <Input
+   581→   581→                      id="yt-role"
+   582→   582→                      placeholder="e.g. Senior React Developer"
+   583→   583→                      value={targetRole}
+   584→   584→                      onChange={(e) => setTargetRole(e.target.value)}
+   585→   585→                    />
+   586→   586→                  </div>
+   587→   587→                </div>
+   588→   588→              </div>
+   589→   589→            )}
+   590→   590→
+   591→   591→            {/* Fetch mode switcher */}
+   592→   592→            <div className="flex gap-1 rounded-lg bg-zinc-100 dark:bg-zinc-800 p-1">
+   593→   593→              <button
+   594→   594→                type="button"
+   595→   595→                onClick={() => setFetchMode("auto")}
+   596→   596→                disabled={showHint}
+   597→   597→                className={`flex-1 rounded-md py-1.5 text-xs font-medium transition-colors ${
+   598→   598→                  effectiveFetchMode === "auto"
+   599→   599→                    ? "bg-white dark:bg-zinc-950 text-zinc-900 dark:text-white shadow-sm"
+   600→   600→                    : "text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-300"
+   601→   601→                } ${showHint ? "cursor-not-allowed opacity-50" : ""}`}
+   602→   602→              >
+   603→   603→                Auto-fetch transcript
+   604→   604→              </button>
+   605→   605→              <button
+   606→   606→                type="button"
+   607→   607→                onClick={() => setFetchMode("manual")}
+   608→   608→                className={`flex-1 rounded-md py-1.5 text-xs font-medium transition-colors ${
+   609→   609→                  effectiveFetchMode === "manual"
+   610→   610→                    ? "bg-white dark:bg-zinc-950 text-zinc-900 dark:text-white shadow-sm"
+   611→   611→                    : "text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-300"
+   612→   612→                }`}
+   613→   613→              >
+   614→   614→                Paste transcript manually
+   615→   615→              </button>
+   616→   616→            </div>
+   617→   617→
+   618→   618→            {effectiveFetchMode === "manual" && (
+   619→   619→              <div className="space-y-1.5">
+   620→   620→                <Label htmlFor="yt-transcript" className="flex items-center gap-1.5">
+   621→   621→                  <ClipboardPaste className="h-3.5 w-3.5" />
+   622→   622→                  Transcript text *
+   623→   623→                </Label>
+   624→   624→                <Textarea
+   625→   625→                  id="yt-transcript"
+   626→   626→                  placeholder={
+   627→   627→                    "Paste the transcript here.\n" +
+   628→   628→                    "Timestamps are optional — both of these work:\n" +
+   629→   629→                    "  0:15 First line of the transcript\n" +
+   630→   630→                    "  [0:30] Second line of the transcript\n" +
+   631→   631→                    "Or just paste plain text, one sentence per line."
+   632→   632→                  }
+   633→   633→                  value={transcript}
+   634→   634→                  onChange={(e) => setTranscript(e.target.value)}
+   635→   635→                  rows={6}
+   636→   636→                  className="resize-y font-mono text-xs"
+   637→   637→                />
+   638→   638→                <p className="text-[11px] text-zinc-500">
+   639→   639→                  Tip: On YouTube, click &quot;… More&quot; below the video,
+   640→   640→                  then &quot;Show transcript&quot;. Copy the text from the
+   641→   641→                  panel that opens, then paste it here.
+   642→   642→                </p>
+   643→   643→                {transcript.trim() &&
+   644→   644→                  !/^\[?\d{1,2}:\d{2}(?::\d{2})?\]?/m.test(transcript) &&
+   645→   645→                  (startTime.trim() || endTime.trim()) && (
+   646→   646→                    <p className="text-[11px] text-amber-600 dark:text-amber-400">
+   647→   647→                      Your pasted transcript doesn&apos;t have timestamps, so
+   648→   648→                      the start/end times will be ignored — we&apos;ll use the
+   649→   649→                      whole paste instead.
+   650→   650→                    </p>
+   651→   651→                  )}
+   652→   652→              </div>
+   653→   653→            )}
+   654→   654→
+   655→   655→            {/* Time range */}
+   656→   656→            <div className="grid grid-cols-2 gap-3">
+   657→   657→              <div className="space-y-1.5">
+   658→   658→                <Label htmlFor="yt-start">Start time (optional)</Label>
+   659→   659→                <Input
+   660→   660→                  id="yt-start"
+   661→   661→                  placeholder="0:00"
+   662→   662→                  value={startTime}
+   663→   663→                  onChange={(e) => setStartTime(e.target.value)}
+   664→   664→                />
+   665→   665→                <p className="text-[11px] text-zinc-500">
+   666→   666→                  Minutes, not seconds. <code>5</code> = 5&nbsp;min. Also
+   667→   667→                  accepts <code>5:30</code>, <code>1:25:30</code>,{" "}
+   668→   668→                  <code>90s</code>, <code>1h30m</code>.
+   669→   669→                </p>
+   670→   670→              </div>
+   671→   671→              <div className="space-y-1.5">
+   672→   672→                <Label htmlFor="yt-end">End time (optional)</Label>
+   673→   673→                <Input
+   674→   674→                  id="yt-end"
+   675→   675→                  placeholder="e.g. 5:30"
+   676→   676→                  value={endTime}
+   677→   677→                  onChange={(e) => setEndTime(e.target.value)}
+   678→   678→                />
+   679→   679→                <p className="text-[11px] text-zinc-500">
+   680→   680→                  A bare number is minutes. Leave empty for full video.
+   681→   681→                </p>
+   682→   682→              </div>
+   683→   683→            </div>
+   684→   684→
+   685→   685→            {/* Custom instructions */}
+   686→   686→            <div className="space-y-1.5">
+   687→   687→              <Label htmlFor="yt-instructions">
+   688→   688→                Custom instructions (optional)
+   689→   689→              </Label>
+   690→   690→              <Textarea
+   691→   691→                id="yt-instructions"
+   692→   692→                placeholder={
+   693→   693→                  mode === "interview"
+   694→   694→                    ? "e.g. Focus on React hooks and skip the intro. Include system design questions."
+   695→   695→                    : mode === "ask"
+   696→   696→                    ? "e.g. Treat the transcript as the only source of truth — if I ask about something not in the video, tell me."
+   697→   697→                    : "e.g. Focus on the main arguments and skip the intro"
+   698→   698→                }
+   699→   699→                value={instructions}
+   700→   700→                onChange={(e) => setInstructions(e.target.value)}
+   701→   701→                rows={2}
+   702→   702→                className="resize-none"
+   703→   703→              />
+   704→   704→            </div>
+   705→   705→          </div>
+   706→   706→
+   707→   707→          {/* Footer with action buttons */}
+   708→   708→          <div className="flex items-center justify-between gap-2 border-t border-zinc-200 dark:border-zinc-800 bg-zinc-50/50 dark:bg-zinc-900/50 px-4 py-3">
+   709→   709→            <p className="hidden sm:block text-[11px] text-zinc-500 dark:text-zinc-400">
+   710→   710→              <Sparkles className="inline h-3 w-3 mr-1 text-emerald-500" />
+   711→   711→              All fields except URL are optional
+   712→   712→            </p>
+   713→   713→            <div className="flex items-center gap-2 ml-auto">
+   714→   714→              <Button variant="outline" onClick={handleClose}>
+   715→   715→                Cancel
+   716→   716→              </Button>
+   717→   717→              <Button onClick={handleSubmit} disabled={!canSubmit}>
+   718→   718→                <Youtube className="h-4 w-4 mr-1.5" />
+   719→   719→                {submitButtonLabel}
+   720→   720→              </Button>
+   721→   721→            </div>
+   722→   722→          </div>
+   723→   723→        </div>
+   724→   724→      </div>
+   725→   725→    </div>
+   726→   726→  );
+   727→   727→}
+   728→   728→

@@ -9,6 +9,7 @@ import {
   fetchTranscriptWithRetry,
   parseUserTranscript,
   TIMESTAMP_RULES,
+  TIMELINE_RULES,
   buildLanguageInstruction,
 } from "@/lib/youtube-transcript";
 import {
@@ -64,6 +65,7 @@ async function summarizeChunk(
     `Use Markdown. Do not invent information that isn't in the transcript. ` +
     `Be EXHAUSTIVE — it is better to over-include than to miss a small topic. ` +
     `Aim for 800-1500 words for a typical 5-10 minute segment.` +
+    TIMELINE_RULES +
     buildLanguageInstruction(ctx.language);
 
   const userMessage =
@@ -122,6 +124,7 @@ async function summarizeSection(
     `Aim for 1500-3000 words for the section. Be exhaustive.\n\n` +
     TIMESTAMP_RULES + `\n\n` +
     `Use Markdown. Do not invent information not present in the per-chunk summaries.` +
+    TIMELINE_RULES +
     buildLanguageInstruction(ctx.language);
 
   const chunksDescription = chunkSummariesForGroup
@@ -213,6 +216,7 @@ function buildReduceMessages(
     `- Do NOT be concise at the cost of completeness — exhaustiveness is the priority.\n` +
     `- When the same topic appears in multiple ${inputWord}s, MERGE the details under one heading (don't repeat).\n` +
     `- Use Markdown headings, bold, lists, and code blocks for clarity.` +
+    TIMELINE_RULES +
     buildLanguageInstruction(ctx.language);
 
   const segmentsDescription = inputSummaries
@@ -393,6 +397,7 @@ export async function POST(req: NextRequest) {
         "- Do NOT invent information that isn't in the transcript.\n" +
         "- Do NOT be concise at the cost of completeness — exhaustiveness is the priority.\n" +
         "- Use Markdown headings, bold, lists, and code blocks for clarity." +
+        TIMELINE_RULES +
         buildLanguageInstruction(language);
 
       const userMessage =

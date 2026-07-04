@@ -9,6 +9,7 @@ import {
   fetchTranscriptWithRetry,
   parseUserTranscript,
   TIMESTAMP_RULES,
+  TIMELINE_RULES,
   buildLanguageInstruction,
 } from "@/lib/youtube-transcript";
 import {
@@ -119,6 +120,7 @@ function buildSystemPrompt(
     `questions and note any limitations at the top.\n` +
     `5. Vary the question style (definition, application, comparison, scenario, debugging).\n` +
     `6. Every answer MUST cite at least one [timestamp] from the transcript where the topic is discussed. ` +
+    TIMELINE_RULES +
     buildLanguageInstruction(language)
   );
 }

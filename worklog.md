@@ -398,3 +398,21 @@ Verification:
 Stage Summary:
 - Files changed: src/lib/youtube-transcript.ts (added buildLanguageInstruction helper), src/components/chat/YouTubeInlinePanel.tsx (added language field), src/store/chat.ts (added language to VideoContext), src/app/page.tsx (thread language through all 3 YouTube modes + persist on videoContext + thread to /api/chat), src/app/api/youtube-summary/route.ts (language in 4 prompts + header), src/app/api/youtube-interview/route.ts (language in buildSystemPrompt + reduceCtx + header), src/app/api/chat/route.ts (language in short + long video system prompts), src/app/api/youtube-load/route.ts (accept language in body)
 - Contract: empty language field → app behaves exactly as before (default English). Non-empty language field → entire AI response (summary / Q&A / chat answer) is written in that language, with timestamps/code/tool names preserved in original form. Verified end-to-end with a real LLM round-trip in Hindi.
+
+---
+Task ID: final-polish
+Agent: main
+Task: Make the app's AI as capable as a top-tier chat assistant + provide a complete minute-by-minute timeline (1–5 min intervals) for every YouTube summary/Q&A.
+
+Work Log:
+- Added `TIMELINE_RULES` constant in `src/lib/youtube-transcript.ts` — forces the AI to end every YouTube output with a `## ⏱️ Minute-by-Minute Timeline` section, walking through the entire video with one entry per ~1–5 minute window, timestamps copied EXACTLY from the transcript, ascending order, no gaps.
+- Injected `TIMELINE_RULES` into the YouTube summary pipeline at every level: short-video single-call prompt, MAP (summarizeChunk), SECTION reduce (summarizeSection), and FINAL reduce (buildReduceMessages). So short, long, and very-long videos all produce a complete end-to-end timeline.
+- Injected `TIMELINE_RULES` into the interview Q&A `buildSystemPrompt` so interview outputs also end with a complete timeline (in addition to the question bank and cheat-sheet).
+- Strengthened the chat route's default system prompt in `src/app/api/chat/route.ts`: now positions the assistant as "world-class, relentlessly helpful", with explicit rules to SOLVE the problem (not hint), be EXHAUSTIVE, think step-by-step, be concrete, anticipate follow-ups, admit ignorance honestly, match the user's language. Added specific guidance for code-help, advice-giving, and summary requests.
+- Verified: `npx tsc --noEmit` → 0 errors. `npx eslint` on changed files → 0 errors. `npx next build` → ✓ Compiled successfully, all 12 routes generated.
+
+Stage Summary:
+- Every YouTube summary / interview Q&A now ends with a complete minute-by-minute timeline the user can scan end-to-end — answering "provide all timestamps like 1min to 5min".
+- The default chat AI is now instructed to fully solve problems and give complete, exhaustive, working solutions — closer to a top-tier chat assistant experience.
+- Language override (from the inline panel) continues to be honored across summary, interview, ask-about-video, and chat.
+- No regressions: type-check, lint, and production build all pass cleanly.

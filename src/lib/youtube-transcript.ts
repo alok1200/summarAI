@@ -133,6 +133,47 @@ export const TIMESTAMP_RULES =
   `[start]–[end] with a short title, e.g. "[3:25]–[7:48] React hooks intro".`;
 
 /**
+ * Shared instructions that force the AI to produce a DENSE, COMPLETE
+ * minute-by-minute timeline of the video — covering every 1–5 minute
+ * interval so the user can jump to any moment and understand what's there.
+ *
+ * This is the answer to "provide all timestamps like 1min to 5min — provide
+ * all details": the AI must walk through the ENTIRE video, picking the most
+ * informative timestamp in every ~1–5 minute window, and writing a 1–3
+ * sentence note about what happens there. No gaps, no skipping.
+ *
+ * Used in /api/youtube-summary (short-video call + map/section/reduce) and
+ * /api/youtube-interview, so EVERY output ends with a complete timeline the
+ * user can scan end-to-end.
+ */
+export const TIMELINE_RULES =
+  `\n\nMINUTE-BY-MINUTE TIMELINE (mandatory section — never skip):\n` +
+  `You MUST end every output with a section titled exactly:\n` +
+  `   ## ⏱️ Minute-by-Minute Timeline\n\n` +
+  `Rules for this section:\n` +
+  `- Walk through the ENTIRE video from start to end. Do NOT skip any part.\n` +
+  `- Pick ONE representative timestamp for every ~1–5 minute window of the video. ` +
+  `For a 30-minute video that means ~6–30 entries; for a 2-hour video, ~24–120 entries. ` +
+  `It is better to have MORE entries than fewer — never leave a 5-minute gap with no entry.\n` +
+  `- Each entry MUST be a Markdown bullet in this exact format:\n` +
+  `    - [MM:SS] short title — 1–3 sentence description of what happens at this moment. ` +
+  `Copy the timestamp EXACTLY from the transcript (use [H:MM:SS] if the video is 1 hour+).\n` +
+  `- The timestamps MUST be in ascending order with no duplicates.\n` +
+  `- Cover EVERY topic, demo, example, definition, transition, and notable moment — ` +
+  `the user should be able to scan this list and find ANY part of the video.\n` +
+  `- Do NOT invent timestamps. If you are unsure, find the closest real timestamp ` +
+  `in the transcript and use that.\n` +
+  `- After the bullets, add a one-line summary: "Total covered: [start]–[end], N moments."\n\n` +
+  `Example of the expected format:\n` +
+  `   ## ⏱️ Minute-by-Minute Timeline\n` +
+  `   - [0:42] Channel intro — host introduces the topic and today's agenda.\n` +
+  `   - [3:15] First concept — definition of X with a quick analogy.\n` +
+  `   - [7:50] Code demo — walks through a minimal example in the editor.\n` +
+  `   - [12:08] Common pitfall — explains why naive approach fails.\n` +
+  `   ...\n` +
+  `   Total covered: [0:00]–[28:45], 18 moments.\n`;
+
+/**
  * Build the LANGUAGE INSTRUCTION block that gets appended to YouTube-related
  * system prompts.
  *

@@ -1,0 +1,612 @@
+     1→import { NextRequest } from "next/server";
+     2→import {
+     3→  type TranscriptSegment,
+     4→  type VideoMeta,
+     5→  extractVideoId,
+     6→  parseTimeString,
+     7→  formatTime,
+     8→  fetchVideoMeta,
+     9→  fetchTranscriptWithRetry,
+    10→  parseUserTranscript,
+    11→  TIMESTAMP_RULES,
+    12→  buildLanguageInstruction,
+    13→} from "@/lib/youtube-transcript";
+    14→import {
+    15→  chatComplete,
+    16→  chatCompleteStream,
+    17→  streamHeaderAndLLM,
+    18→  type ChatMessage,
+    19→} from "@/lib/llm";
+    20→import {
+    21→  chunkTranscript,
+    22→  mapChunks,
+    23→  shouldUseMapReduce,
+    24→  planReduce,
+    25→  groupLabel,
+    26→  type TranscriptChunk,
+    27→} from "@/lib/youtube-chunks";
+    28→
+    29→export const runtime = "nodejs";
+    30→export const dynamic = "force-dynamic";
+    31→
+    32→function jsonResponse(status: number, body: unknown) {
+    33→  return new Response(JSON.stringify(body), {
+    34→    status,
+    35→    headers: { "Content-Type": "application/json" },
+    36→  });
+    37→}
+    38→
+    39→/**
+    40→ * MAP step: summarize a single chunk. Used for parallel processing of long
+    41→ * transcripts. Each chunk gets its own focused summary that preserves the
+    42→ * timestamps from that segment of the video.
+    43→ */
+    44→async function summarizeChunk(
+    45→  chunk: TranscriptChunk,
+    46→  ctx: { url: string; videoTitle: string | undefined; videoChannel: string | undefined; instructions: string | undefined; language?: string }
+    47→): Promise<string> {
+    48→  const systemPrompt =
+    49→    `You are an expert AI assistant that produces COMPREHENSIVE, DETAILED summaries of ONE segment of a longer YouTube video transcript. ` +
+    50→    `This segment covers ${chunk.startTimeLabel} – ${chunk.endTimeLabel} ` +
+    51→    `(chunk ${chunk.index} of ${chunk.total}). ` +
+    52→    `Your goal is to capture EVERY topic, sub-topic, example, demo, and insight in this segment — nothing should be lost.\n\n` +
+    53→    `Produce a thorough, well-structured summary of JUST this segment with:\n` +
+    54→    `- A 3-4 sentence overview that explicitly names every topic discussed in this segment\n` +
+    55→    `- A DETAILED breakdown with a ### sub-heading for EVERY topic, sub-topic, or notable moment. Each sub-section must include:\n` +
+    56→    `  · The timestamp where it appears in this segment — copy it EXACTLY from the transcript (e.g. [3:25] or [1:25:30])\n` +
+    57→    `  · A long-form explanation (3-6+ sentences) of what is being discussed\n` +
+    58→    `  · Any examples, demos, code, or analogies used\n` +
+    59→    `  · Any context, motivation, reasoning, or background provided\n` +
+    60→    `  · Any caveats, tips, gotchas, or best-practice advice\n` +
+    61→    `  · Any names, tools, libraries, frameworks, or resources mentioned\n` +
+    62→    `- A "Notable quotes & insights" subsection with direct quotes (each followed by its [timestamp])\n\n` +
+    63→    TIMESTAMP_RULES + `\n\n` +
+    64→    `Use Markdown. Do not invent information that isn't in the transcript. ` +
+    65→    `Be EXHAUSTIVE — it is better to over-include than to miss a small topic. ` +
+    66→    `Aim for 800-1500 words for a typical 5-10 minute segment.` +
+    67→    buildLanguageInstruction(ctx.language);
+    68→
+    69→  const userMessage =
+    70→    `Produce a COMPREHENSIVE summary of this segment of a YouTube video transcript. ` +
+    71→    `Cover EVERY topic in long-form detail — do not skip or compress anything.\n\n` +
+    72→    `Video URL: ${ctx.url}\n` +
+    73→    (ctx.videoTitle ? `Video title: ${ctx.videoTitle}\n` : "") +
+    74→    (ctx.videoChannel ? `Video channel: ${ctx.videoChannel}\n` : "") +
+    75→    `Segment: ${chunk.startTimeLabel} – ${chunk.endTimeLabel} (chunk ${chunk.index}/${chunk.total}, ${chunk.segmentCount} segments)\n\n` +
+    76→    (ctx.instructions ? `User instructions: ${ctx.instructions}\n\n` : "") +
+    77→    `Transcript segment:\n\n${chunk.text}\n\n` +
+    78→    `Provide your comprehensive structured summary now.`;
+    79→
+    80→  return await chatComplete(
+    81→    [
+    82→      { role: "system", content: systemPrompt },
+    83→      { role: "user", content: userMessage },
+    84→    ],
+    85→    { maxTokens: 8000 }
+    86→  );
+    87→}
+    88→
+    89→/**
+    90→ * SECTION REDUCE step (level 1 of hierarchical reduce): combine the per-chunk
+    91→ * summaries from ONE batch of ~7 contiguous chunks into a single
+    92→ * "section summary" for that time range. This keeps the final reduce call's
+    93→ * input small enough to fit in the LLM's context window even for 50-hour videos.
+    94→ *
+    95→ * Like the MAP step, this produces a comprehensive long-form summary — just
+    96→ * synthesized across multiple chunks of the same section.
+    97→ */
+    98→async function summarizeSection(
+    99→  group: TranscriptChunk[],
+   100→  chunkSummariesForGroup: string[],
+   101→  ctx: { url: string; videoTitle: string | undefined; videoChannel: string | undefined; instructions: string | undefined; language?: string }
+   102→): Promise<string> {
+   103→  const label = groupLabel(group);
+   104→  const segmentCount = group.reduce((n, c) => n + c.segmentCount, 0);
+   105→
+   106→  const systemPrompt =
+   107→    `You are an expert AI assistant producing a COMPREHENSIVE section summary of part of a long YouTube video. ` +
+   108→    `This section covers ${label} (${segmentCount} transcript segments total). ` +
+   109→    `You will be given ${chunkSummariesForGroup.length} per-chunk summaries for contiguous chunks within this section. ` +
+   110→    `Synthesize them into ONE coherent, EXHAUSTIVE summary that captures EVERY topic, sub-topic, example, demo, and insight ` +
+   111→    `from this section. Reorganize and deduplicate where the same topic appears in multiple chunks, but DO NOT drop any content.\n\n` +
+   112→    `Your output MUST follow this structure (use Markdown):\n\n` +
+   113→    `### Section Overview — ${label}\n` +
+   114→    `3-4 sentences naming every major topic discussed in this section.\n\n` +
+   115→    `### Detailed Breakdown — Every Point in This Section\n` +
+   116→    `For EVERY topic, sub-topic, example, or notable moment in this section, create a #### sub-heading and write a ` +
+   117→    `LONG-FORM detailed explanation (3-6+ sentences) underneath. Each sub-section must include:\n` +
+   118→    `- The timestamp(s) where it appears — copy EXACTLY from the per-chunk summaries (e.g. [3:25] or [1:25:30])\n` +
+   119→    `- A thorough explanation of what is being discussed\n` +
+   120→    `- Any examples, demos, code, analogies, context, motivation, caveats, tips, or resources mentioned\n\n` +
+   121→    `Cover EVERY small topic — even brief mentions deserve their own entry. ` +
+   122→    `Aim for 1500-3000 words for the section. Be exhaustive.\n\n` +
+   123→    TIMESTAMP_RULES + `\n\n` +
+   124→    `Use Markdown. Do not invent information not present in the per-chunk summaries.` +
+   125→    buildLanguageInstruction(ctx.language);
+   126→
+   127→  const chunksDescription = chunkSummariesForGroup
+   128→    .map((s, i) => {
+   129→      const c = group[i];
+   130→      return `#### Chunk ${c.index}/${c.total}  (${c.startTimeLabel} – ${c.endTimeLabel})\n\n${s}`;
+   131→    })
+   132→    .join("\n\n---\n\n");
+   133→
+   134→  const userMessage =
+   135→    `Produce a COMPREHENSIVE section summary covering ${label}.\n\n` +
+   136→    `Video URL: ${ctx.url}\n` +
+   137→    (ctx.videoTitle ? `Video title: ${ctx.videoTitle}\n` : "") +
+   138→    (ctx.videoChannel ? `Video channel: ${ctx.videoChannel}\n` : "") +
+   139→    (ctx.instructions ? `User instructions: ${ctx.instructions}\n\n` : "") +
+   140→    `Per-chunk summaries for this section:\n\n${chunksDescription}\n\n` +
+   141→    `Provide your comprehensive section summary now.`;
+   142→
+   143→  return await chatComplete(
+   144→    [
+   145→      { role: "system", content: systemPrompt },
+   146→      { role: "user", content: userMessage },
+   147→    ],
+   148→    { maxTokens: 10000 }
+   149→  );
+   150→}
+   151→
+   152→/**
+   153→ * REDUCE step: combine per-chunk summaries (or per-section summaries in
+   154→ * hierarchical mode) into one unified final summary. Streams the final result
+   155→ * so the user sees tokens immediately.
+   156→ *
+   157→ * @param inputSummaries  The summaries to reduce. Each one is a long-form
+   158→ *                        markdown summary of a chunk OR a section.
+   159→ * @param inputLabels     Labels for each summary, e.g. "Segment 3 of 25 (00:15:00 – 00:22:30)"
+   160→ *                        or "Section 2 of 15 (01:42:30 – 02:55:00, chunks 8–14)".
+   161→ */
+   162→function buildReduceMessages(
+   163→  inputSummaries: string[],
+   164→  inputLabels: string[],
+   165→  ctx: {
+   166→    url: string;
+   167→    videoTitle: string | undefined;
+   168→    videoChannel: string | undefined;
+   169→    instructions: string | undefined;
+   170→    language?: string;
+   171→    actualStartTime: number;
+   172→    actualEndTime: number;
+   173→    totalSegments: number;
+   174→    /** Total chunks in the source transcript (for display). */
+   175→    totalChunks: number;
+   176→    /** Whether the inputs are section summaries (hierarchical) or chunk summaries (flat). */
+   177→    inputKind: "chunk" | "section";
+   178→  }
+   179→): ChatMessage[] {
+   180→  const inputWord = ctx.inputKind === "section" ? "section" : "per-segment";
+   181→  const systemPrompt =
+   182→    `You are an expert AI assistant producing the FINAL COMPREHENSIVE summary of a long YouTube video. ` +
+   183→    `You will be given ${inputSummaries.length} ${inputWord} summaries (each covering a different ` +
+   184→    `time range of the video, in order). Your job is to synthesize them into ONE coherent, EXHAUSTIVE ` +
+   185→    `summary that captures EVERY topic, sub-topic, example, demo, and insight from the entire video. ` +
+   186→    `Reorganize and deduplicate where the same topic appears in multiple ${inputWord}s, but DO NOT drop any ` +
+   187→    `content — exhaustiveness is the top priority.\n\n` +
+   188→    `Your output MUST follow this exact structure (use Markdown):\n\n` +
+   189→    `## TL;DR — All Key Points at a Glance\n` +
+   190→    `A 5-8 sentence overview that explicitly names EVERY major topic, concept, technique, tool, and idea discussed ` +
+   191→    `across the entire video. The reader should get a complete map of the video's coverage just from this section. ` +
+   192→    `Do not be abstract — list concrete subject names.\n\n` +
+   193→    `## Detailed Breakdown — Every Point Explained\n` +
+   194→    `For EVERY topic, sub-topic, example, demo, or notable moment in the entire video, create a ### sub-heading ` +
+   195→    `and write a LONG-FORM detailed explanation underneath. Group related content from different ${inputWord}s together ` +
+   196→    `under the most fitting heading. Each sub-section MUST include:\n` +
+   197→    `- The timestamp(s) where it appears in the video — copy EXACTLY from the ${inputWord} summaries (e.g. [3:25] or [1:25:30])\n` +
+   198→    `- A thorough explanation of WHAT is being discussed (3-6+ sentences minimum)\n` +
+   199→    `- Any examples, demos, code snippets, or analogies the speaker uses\n` +
+   200→    `- Any context, reasoning, motivation, or background the speaker provides\n` +
+   201→    `- Any caveats, tips, gotchas, or best-practice advice mentioned\n` +
+   202→    `- Any names, tools, libraries, frameworks, URLs, or resources referenced\n\n` +
+   203→    `Cover EVERY small topic — even brief mentions or quick tips deserve their own entry. ` +
+   204→    `For a long video, aim for 30-200+ distinct sub-sections. It is far better to over-include than to miss something.\n\n` +
+   205→    `## Notable Quotes & Insights\n` +
+   206→    `Direct quotes (each followed by its [timestamp]) and any particularly insightful or counterintuitive points the speaker makes ` +
+   207→    `anywhere in the video.\n\n` +
+   208→    `## Chapter Index\n` +
+   209→    `A compact list of the main sections of the video with their time ranges (using [start]–[end] format), so the reader can jump to a specific part.\n\n` +
+   210→    TIMESTAMP_RULES + `\n\n` +
+   211→    `STRICT RULES:\n` +
+   212→    `- Do NOT invent information not present in the ${inputWord} summaries.\n` +
+   213→    `- Do NOT be concise at the cost of completeness — exhaustiveness is the priority.\n` +
+   214→    `- When the same topic appears in multiple ${inputWord}s, MERGE the details under one heading (don't repeat).\n` +
+   215→    `- Use Markdown headings, bold, lists, and code blocks for clarity.` +
+   216→    buildLanguageInstruction(ctx.language);
+   217→
+   218→  const segmentsDescription = inputSummaries
+   219→    .map((s, i) => `### ${inputLabels[i]}\n\n${s}`)
+   220→    .join("\n\n---\n\n");
+   221→
+   222→  const userMessage =
+   223→    `Produce the FINAL COMPREHENSIVE unified summary of this YouTube video. ` +
+   224→    `Cover EVERY topic from EVERY ${inputWord} in long-form detail — do not skip, compress, or omit anything.\n\n` +
+   225→    `Video URL: ${ctx.url}\n` +
+   226→    (ctx.videoTitle ? `Video title: ${ctx.videoTitle}\n` : "") +
+   227→    (ctx.videoChannel ? `Video channel: ${ctx.videoChannel}\n` : "") +
+   228→    `Total time range: ${formatTime(ctx.actualStartTime)} – ${formatTime(ctx.actualEndTime)}  ` +
+   229→    `(${ctx.totalSegments} segments across ${ctx.totalChunks} chunks, ` +
+   230→    `synthesized from ${inputSummaries.length} ${inputWord} summaries)\n\n` +
+   231→    (ctx.instructions ? `User instructions: ${ctx.instructions}\n\n` : "") +
+   232→    `${inputWord.charAt(0).toUpperCase() + inputWord.slice(1)} summaries:\n\n${segmentsDescription}\n\n` +
+   233→    `Please provide the final comprehensive unified summary now. Remember: brief TL;DR covering ALL points, ` +
+   234→    `then DETAILED long-form coverage of EVERY single topic across all ${inputWord}s.`;
+   235→
+   236→  return [
+   237→    { role: "system", content: systemPrompt },
+   238→    { role: "user", content: userMessage },
+   239→  ];
+   240→}
+   241→
+   242→export async function POST(req: NextRequest) {
+   243→  let parsedVideoId: string | null = null;
+   244→  try {
+   245→    const body = await req.json();
+   246→    const url: string = body.url ?? "";
+   247→    const startTimeStr: string = body.startTime ?? "";
+   248→    const endTimeStr: string = body.endTime ?? "";
+   249→    const instructions: string = (body.instructions ?? "").trim();
+   250→    const manualTranscript: string = (body.transcript ?? "").trim();
+   251→    const language: string = (body.language ?? "").trim();
+   252→
+   253→    parsedVideoId = extractVideoId(url);
+   254→    if (!parsedVideoId) {
+   255→      return jsonResponse(400, {
+   256→        error:
+   257→          "Could not extract a video ID from this URL. Please paste a YouTube link like https://www.youtube.com/watch?v=…",
+   258→      });
+   259→    }
+   260→    const videoId = parsedVideoId;
+   261→
+   262→    const startTime = parseTimeString(startTimeStr);
+   263→    const endTime = parseTimeString(endTimeStr);
+   264→
+   265→    if (
+   266→      startTime !== undefined &&
+   267→      endTime !== undefined &&
+   268→      startTime >= endTime
+   269→    ) {
+   270→      return jsonResponse(400, {
+   271→        error: "Start time must be earlier than end time.",
+   272→      });
+   273→    }
+   274→
+   275→    let allSegments: TranscriptSegment[];
+   276→    let isManual = false;
+   277→    let skipTimeFilter = false;
+   278→
+   279→    if (manualTranscript) {
+   280→      const { segments: parsed, hasTimestamps } =
+   281→        parseUserTranscript(manualTranscript);
+   282→      if (parsed.length === 0) {
+   283→        return jsonResponse(400, {
+   284→          error:
+   285→            "Couldn't find any transcript text in your paste. Please paste at least one line of the transcript.",
+   286→        });
+   287→      }
+   288→      allSegments = parsed;
+   289→      isManual = true;
+   290→      if (!hasTimestamps && (startTime !== undefined || endTime !== undefined)) {
+   291→        skipTimeFilter = true;
+   292→      }
+   293→    } else {
+   294→      allSegments = await fetchTranscriptWithRetry(videoId);
+   295→    }
+   296→
+   297→    let filtered = skipTimeFilter
+   298→      ? allSegments
+   299→      : allSegments.filter((s) => {
+   300→          if (startTime !== undefined && s.start < startTime) return false;
+   301→          if (endTime !== undefined && s.start >= endTime) return false;
+   302→          return true;
+   303→        });
+   304→
+   305→    let rangeNote: string | undefined;
+   306→    if (skipTimeFilter) {
+   307→      rangeNote =
+   308→        "Time range was ignored because the pasted transcript has no timestamps — summarized the whole paste instead.";
+   309→    } else if (filtered.length === 0 && allSegments.length > 0) {
+   310→      filtered = allSegments;
+   311→      const totalSegs = allSegments.length;
+   312→      const firstStart = Math.floor(allSegments[0].start);
+   313→      const lastStart = Math.floor(allSegments[totalSegs - 1].start);
+   314→      const rangeLabel =
+   315→        startTime !== undefined && endTime !== undefined
+   316→          ? `${formatTime(startTime)} – ${formatTime(endTime)}`
+   317→          : startTime !== undefined
+   318→          ? `after ${formatTime(startTime)}`
+   319→          : endTime !== undefined
+   320→          ? `before ${formatTime(endTime)}`
+   321→          : "(no range)";
+   322→      rangeNote =
+   323→        `No segments were found in your requested range (${rangeLabel}), so the whole transcript ` +
+   324→        `(${formatTime(firstStart)} – ${formatTime(lastStart)}, ${totalSegs} segments) was summarized instead. ` +
+   325→        `Adjust the time range to overlap with the transcript and try again for a more targeted summary.`;
+   326→    }
+   327→
+   328→    const actualStartTime = filtered[0].start;
+   329→    const lastSeg = filtered[filtered.length - 1];
+   330→    const actualEndTime = lastSeg.start + lastSeg.dur;
+   331→
+   332→    const videoMeta: VideoMeta | null = await fetchVideoMeta(videoId);
+   333→    const ctx = {
+   334→      url,
+   335→      videoTitle: videoMeta?.title,
+   336→      videoChannel: videoMeta?.author,
+   337→      instructions: instructions || undefined,
+   338→      language: language || undefined,
+   339→      actualStartTime,
+   340→      actualEndTime,
+   341→      totalSegments: filtered.length,
+   342→    };
+   343→
+   344→    const sourceLabel = isManual ? " (manual paste)" : "";
+   345→    const header =
+   346→      `**▶️ YouTube Video Summary${sourceLabel}**\n\n` +
+   347→      (videoMeta
+   348→        ? `**Title:** ${videoMeta.title}\n**Channel:** ${videoMeta.author}\n`
+   349→        : "") +
+   350→      `**URL:** ${url}\n` +
+   351→      `**Time range:** ${formatTime(actualStartTime)} – ${formatTime(
+   352→        actualEndTime
+   353→      )}  ·  ${filtered.length} transcript segments\n` +
+   354→      (rangeNote ? `**Note:** ${rangeNote}\n` : "") +
+   355→      (instructions ? `**Your instructions:** ${instructions}\n` : "") +
+   356→      (language ? `**Response language:** ${language}\n` : "") +
+   357→      `\n---\n\n`;
+   358→
+   359→    // Decide whether to use map-reduce (long videos) or a single LLM call.
+   360→    const useMapReduce = shouldUseMapReduce(filtered);
+   361→
+   362→    if (!useMapReduce) {
+   363→      // ---------- Short video: single LLM call with real streaming ----------
+   364→      const transcriptText = filtered
+   365→        .map((s) => `[${formatTime(s.start)}] ${s.text}`)
+   366→        .join("\n");
+   367→
+   368→      const systemPrompt =
+   369→        "You are an expert AI assistant that produces COMPREHENSIVE, EXHAUSTIVE summaries of YouTube video transcripts. " +
+   370→        "Your goal is to cover EVERY topic, sub-topic, example, demo, and insight mentioned in the video — nothing should be left out.\n\n" +
+   371→        "Your output MUST follow this exact structure (use Markdown):\n\n" +
+   372→        "## TL;DR — All Key Points at a Glance\n" +
+   373→        "A 4-6 sentence overview that names EVERY major topic discussed in the video. " +
+   374→        "Don't summarize abstractly — explicitly list every subject, technique, concept, tool, or idea mentioned, " +
+   375→        "so the reader gets a complete map of what the video covers just from this section.\n\n" +
+   376→        "## Detailed Breakdown — Every Point Explained\n" +
+   377→        "For EVERY topic, sub-topic, example, or notable moment in the video, create a ### sub-heading and write a LONG-FORM " +
+   378→        "detailed explanation underneath. Each sub-section MUST include:\n" +
+   379→        "- The timestamp where it appears in the video — copy it EXACTLY from the transcript (e.g. [3:25] or [1:25:30])\n" +
+   380→        "- A thorough explanation of WHAT is being discussed (not just a one-liner — write 3-6 sentences minimum per point)\n" +
+   381→        "- Any examples, demos, code snippets, or analogies the speaker uses\n" +
+   382→        "- Any context, reasoning, motivation, or background the speaker provides\n" +
+   383→        "- Any caveats, tips, gotchas, or best-practice advice mentioned\n" +
+   384→        "- Any names, tools, libraries, frameworks, URLs, or resources referenced\n\n" +
+   385→        "Cover EVERY small topic — even minor asides, brief mentions, or quick tips deserve their own entry. " +
+   386→        "It is better to over-include than to miss something. Aim for 15-40 distinct sub-sections for a typical 10-30 minute video.\n\n" +
+   387→        "## Notable Quotes & Insights\n" +
+   388→        "Direct quotes (each followed by its [timestamp]) and any particularly insightful or counterintuitive points the speaker makes.\n\n" +
+   389→        "## Chapter Index\n" +
+   390→        "A compact list of the main sections of the video with their time ranges (using [start]–[end] format), so the reader can jump to a specific part.\n\n" +
+   391→        TIMESTAMP_RULES + "\n\n" +
+   392→        "STRICT RULES:\n" +
+   393→        "- Do NOT invent information that isn't in the transcript.\n" +
+   394→        "- Do NOT be concise at the cost of completeness — exhaustiveness is the priority.\n" +
+   395→        "- Use Markdown headings, bold, lists, and code blocks for clarity." +
+   396→        buildLanguageInstruction(language);
+   397→
+   398→      const userMessage =
+   399→        `Please produce a COMPREHENSIVE summary of the following YouTube video transcript. ` +
+   400→        `Cover EVERY topic and sub-topic in long-form detail — do not skip or compress anything.\n\n` +
+   401→        `Video URL: ${url}\n` +
+   402→        (videoMeta
+   403→          ? `Video title: ${videoMeta.title}\nVideo channel: ${videoMeta.author}\n`
+   404→          : "") +
+   405→        `Selected time range: ${formatTime(actualStartTime)} – ${formatTime(
+   406→          actualEndTime
+   407→        )}  (about ${Math.round(actualEndTime - actualStartTime)}s, ${filtered.length} segments)\n\n` +
+   408→        (instructions
+   409→          ? `Additional instructions from the user: ${instructions}\n\n`
+   410→          : "") +
+   411→        `Transcript (with timestamps):\n\n${transcriptText}\n\n` +
+   412→        `Provide your comprehensive structured summary now. Remember: brief TL;DR covering ALL points, then DETAILED long-form coverage of EVERY single topic.`;
+   413→
+   414→      const llmStream = await chatCompleteStream(
+   415→        [
+   416→          { role: "system", content: systemPrompt },
+   417→          { role: "user", content: userMessage },
+   418→        ],
+   419→        { maxTokens: 16000 }
+   420→      );
+   421→      return streamHeaderAndLLM(header, llmStream);
+   422→    }
+   423→
+   424→    // ---------- Long video: MAP-REDUCE with parallel chunk summarization ----------
+   425→    const chunks = chunkTranscript(filtered);
+   426→    const reducePlan = planReduce(chunks);
+   427→    console.log(
+   428→      `[youtube-summary] MAP-REDUCE: ${filtered.length} segments → ${chunks.length} chunks ` +
+   429→      `(parallel)${reducePlan.hierarchical ? ` → HIERARCHICAL reduce (${reducePlan.groups!.length} sections)` : ""}`
+   430→    );
+   431→
+   432→    // Build a streaming response that:
+   433→    //   1. Emits the header immediately (so the proxy doesn't time out)
+   434→    //   2. Emits a "processing" status line so the user sees progress
+   435→    //   3. Runs all chunk summaries in parallel (MAP step)
+   436→    //   4. If chunks > 8 (hierarchical): runs per-section reduces in parallel
+   437→    //      (SECTION step), each combining ~7 chunk summaries into a section summary
+   438→    //   5. Runs the final reduce step and streams the unified summary (REDUCE step)
+   439→    const encoder = new TextEncoder();
+   440→    const stream = new ReadableStream<Uint8Array>({
+   441→      async start(controller) {
+   442→        const emit = (text: string) => {
+   443→          controller.enqueue(encoder.encode(text));
+   444→        };
+   445→
+   446→        // Phase 1: header + map-reduce notice
+   447→        emit(header);
+   448→        emit(
+   449→          `⏳ **Processing ${chunks.length} chunks in parallel** ` +
+   450→            `(each ~5-10 min of video, summarized independently then merged).` +
+   451→            (reducePlan.hierarchical
+   452→              ? `\n📊 This is a very long video — using **hierarchical reduce** ` +
+   453→                `(${reducePlan.groups!.length} sections of ~${reducePlan.groups![0].length} chunks each) ` +
+   454→                `so nothing gets truncated.`
+   455→              : "") +
+   456→            `\n\n`
+   457→        );
+   458→
+   459→        // Phase 2: parallel MAP step — summarize each chunk
+   460→        const chunkSummaries = await mapChunks(
+   461→          chunks,
+   462→          (chunk) => summarizeChunk(chunk, ctx),
+   463→          (done, total) => {
+   464→            emit(`✅ Chunk ${done}/${total} summarized\n`);
+   465→          },
+   466→          // For very long videos (many chunks), bump concurrency to speed up the MAP step.
+   467→          chunks.length > 20 ? 6 : 4
+   468→        );
+   469→
+   470→        // Phase 3: optional SECTION step (hierarchical reduce level 1)
+   471→        let finalSummaries: string[];
+   472→        let finalLabels: string[];
+   473→        let inputKind: "chunk" | "section";
+   474→
+   475→        if (reducePlan.hierarchical) {
+   476→          const groups = reducePlan.groups!;
+   477→          emit(
+   478→            `\n🔀 **Reducing ${groups.length} sections in parallel** ` +
+   479→              `(each section merges ${groups[0].length}–${groups[groups.length - 1].length} chunk summaries)…\n`
+   480→          );
+   481→
+   482→          // Build a flat list of (groupIndex, chunkSummariesForGroup) tasks,
+   483→          // then run them all in parallel with mapChunks-style concurrency.
+   484→          const sectionResults: string[] = new Array(groups.length);
+   485→          let sectionCursor = 0;
+   486→          let sectionCompleted = 0;
+   487→          const sectionConcurrency = Math.min(4, groups.length);
+   488→
+   489→          async function sectionWorker() {
+   490→            while (true) {
+   491→              const idx = sectionCursor++;
+   492→              if (idx >= groups.length) return;
+   493→              const group = groups[idx];
+   494→              // chunkSummaries is indexed 0..N-1 by chunk position; group
+   495→              // contains the actual TranscriptChunk objects, so we look up
+   496→              // each chunk's summary by its 0-indexed position.
+   497→              const groupChunkIndices = group.map((c) => c.index - 1);
+   498→              const groupSummaries = groupChunkIndices.map(
+   499→                (ci) => chunkSummaries[ci] ?? ""
+   500→              );
+   501→              try {
+   502→                const s = await summarizeSection(group, groupSummaries, ctx);
+   503→                sectionResults[idx] = s;
+   504→              } catch (err) {
+   505→                const msg = err instanceof Error ? err.message : "Unknown error";
+   506→                console.error(`[youtube-summary] section ${idx + 1} failed:`, msg);
+   507→                // Fallback: concatenate the chunk summaries for this group
+   508→                sectionResults[idx] = groupSummaries.join("\n\n---\n\n");
+   509→              }
+   510→              sectionCompleted++;
+   511→              emit(`✅ Section ${sectionCompleted}/${groups.length} reduced\n`);
+   512→            }
+   513→          }
+   514→
+   515→          await Promise.all(
+   516→            Array.from({ length: sectionConcurrency }, () => sectionWorker())
+   517→          );
+   518→
+   519→          finalSummaries = sectionResults;
+   520→          finalLabels = groups.map((g, i) => `Section ${i + 1} of ${groups.length}  ${groupLabel(g)}`);
+   521→          inputKind = "section";
+   522→        } else {
+   523→          finalSummaries = chunkSummaries;
+   524→          finalLabels = chunks.map(
+   525→            (c) => `Segment ${c.index} of ${c.total}  (${c.startTimeLabel} – ${c.endTimeLabel})`
+   526→          );
+   527→          inputKind = "chunk";
+   528→        }
+   529→
+   530→        emit(
+   531→          `\n🔄 **Merging ${finalSummaries.length} ${inputKind} summaries into final answer…**\n\n---\n\n`
+   532→        );
+   533→
+   534→        // Phase 4: final REDUCE step — stream the unified summary
+   535→        const reduceMessages = buildReduceMessages(finalSummaries, finalLabels, {
+   536→          url: ctx.url,
+   537→          videoTitle: ctx.videoTitle,
+   538→          videoChannel: ctx.videoChannel,
+   539→          instructions: ctx.instructions,
+   540→          language: ctx.language,
+   541→          actualStartTime: ctx.actualStartTime,
+   542→          actualEndTime: ctx.actualEndTime,
+   543→          totalSegments: ctx.totalSegments,
+   544→          totalChunks: chunks.length,
+   545→          inputKind,
+   546→        });
+   547→        const finalStream = await chatCompleteStream(reduceMessages, {
+   548→          maxTokens: 16000,
+   549→        });
+   550→        const reader = finalStream.getReader();
+   551→        try {
+   552→          while (true) {
+   553→            const { done, value } = await reader.read();
+   554→            if (done) break;
+   555→            controller.enqueue(value);
+   556→          }
+   557→        } finally {
+   558→          reader.releaseLock();
+   559→        }
+   560→
+   561→        controller.close();
+   562→      },
+   563→    });
+   564→
+   565→    return new Response(stream, {
+   566→      headers: {
+   567→        "Content-Type": "text/plain; charset=utf-8",
+   568→        "Cache-Control": "no-cache, no-transform",
+   569→        Connection: "keep-alive",
+   570→      },
+   571→    });
+   572→  } catch (err: unknown) {
+   573→    const message = err instanceof Error ? err.message : "Unknown error";
+   574→    const code = (err as any)?.code;
+   575→    console.error("[youtube-summary] error:", message, "code:", code);
+   576→
+   577→    let videoMeta: VideoMeta | null = null;
+   578→    if (parsedVideoId) {
+   579→      try {
+   580→        videoMeta = await fetchVideoMeta(parsedVideoId);
+   581→      } catch {
+   582→        // ignore
+   583→      }
+   584→    }
+   585→
+   586→    const metaPayload = videoMeta
+   587→      ? {
+   588→          title: videoMeta.title,
+   589→          author: videoMeta.author,
+   590→          thumbnailUrl: videoMeta.thumbnailUrl,
+   591→        }
+   592→      : null;
+   593→
+   594→    if (code === "BOT_BLOCKED") {
+   595→      return jsonResponse(403, {
+   596→        error: message,
+   597→        code: "BOT_BLOCKED",
+   598→        videoMeta: metaPayload,
+   599→      });
+   600→    }
+   601→    const friendlyMsg = /502|503|504|bad gateway|service unavailable|gateway timeout|upstream/i.test(
+   602→      message
+   603→    )
+   604→      ? "The AI service is temporarily unavailable (gateway error). Please try again in a few seconds — your request will be retried automatically on the next attempt."
+   605→      : message || "YouTube summary failed.";
+   606→    return jsonResponse(500, {
+   607→      error: friendlyMsg,
+   608→      videoMeta: metaPayload,
+   609→    });
+   610→  }
+   611→}
+   612→

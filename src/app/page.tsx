@@ -16,9 +16,9 @@ import { ChatInput } from "@/components/chat/ChatInput";
 import { EmptyState } from "@/components/chat/EmptyState";
 import { LoginScreen } from "@/components/chat/LoginScreen";
 import {
-  YouTubeDialog,
+  YouTubeInlinePanel,
   type YouTubeSubmitPayload,
-} from "@/components/chat/YouTubeDialog";
+} from "@/components/chat/YouTubeInlinePanel";
 import { cn } from "@/lib/utils";
 
 function genId() {
@@ -44,7 +44,7 @@ export default function Home() {
   const [hasHydrated, setHasHydrated] = useState(false);
   const [youtubeOpen, setYoutubeOpen] = useState(false);
   const [youtubeBotHint, setYoutubeBotHint] = useState<string | null>(null);
-  /** Pre-filled URL for the YouTubeDialog — set when the user clicks the
+  /** Pre-filled URL for the YouTubeInlinePanel — set when the user clicks the
    * "Open YouTube dialog →" chip after pasting a YouTube link. */
   const [youtubeInitialUrl, setYoutubeInitialUrl] = useState<string | undefined>(undefined);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -781,39 +781,66 @@ export default function Home() {
           )}
         </div>
 
-        <ChatInput
-          onSubmit={sendMessage}
-          onStop={handleStop}
-          onOpenYouTube={(prefilledUrl) => {
-            setYoutubeInitialUrl(prefilledUrl);
-            setYoutubeOpen(true);
-          }}
-          isStreaming={isStreaming}
-        />
+        {/* INLINE YouTube panel — replaces ChatInput when open so the user
+            fills in URL + mode + time range + instructions all on the same
+            page, with no second modal. The panel renders above where the
+            chat input normally lives; closing the panel brings the input
+            back. */}
+        {youtubeOpen ? (
+          <YouTubeInlinePanel
+            open={youtubeOpen}
+            onClose={() => {
+              setYoutubeOpen(false);
+              setYoutubeInitialUrl(undefined);
+            }}
+            onSubmit={handleYouTube}
+            botBlockedHint={youtubeBotHint}
+            onClearHint={() => setYoutubeBotHint(null)}
+            initialUrl={youtubeInitialUrl}
+          />
+        ) : (
+          <ChatInput
+            onSubmit={sendMessage}
+            onStop={handleStop}
+            onOpenYouTube={(prefilledUrl) => {
+              setYoutubeInitialUrl(prefilledUrl);
+              setYoutubeOpen(true);
+            }}
+            isStreaming={isStreaming}
+          />
+        )}
       </div>
-
-      <YouTubeDialog
-        open={youtubeOpen}
-        onOpenChange={(open) => {
-          setYoutubeOpen(open);
-          if (!open) setYoutubeInitialUrl(undefined);
-        }}
-        onSubmit={handleYouTube}
-        botBlockedHint={youtubeBotHint}
-        onClearHint={() => setYoutubeBotHint(null)}
-        initialUrl={youtubeInitialUrl}
-      />
     </div>
   );
 }
 
 function parseTimeToSec(s: string): number | undefined {
+  // Local display-only parser. Mirrors the backend `parseTimeString` rule:
+  // a bare number means MINUTES (so "5" = 5 min = 300s), not seconds.
+  // The backend re-parses the raw string anyway, so this only affects what
+  // we store in `meta.startTime` for display in the chat bubble.
   const trimmed = s.trim();
   if (!trimmed) return undefined;
+
+  // Honor explicit unit suffixes (5m, 90s, 1h, 1h30m, 2h15m30s).
+  if (/[hms]/i.test(trimmed) && /^[\d\s.:hms]+$/i.test(trimmed)) {
+    const h = trimmed.match(/(\d+)\s*h/i);
+    const m = trimmed.match(/(\d+)\s*m/i);
+    const sec = trimmed.match(/(\d+)\s*s/i);
+    if (h || m || sec) {
+      let total = 0;
+      if (h) total += parseInt(h[1], 10) * 3600;
+      if (m) total += parseInt(m[1], 10) * 60;
+      if (sec) total += parseInt(sec[1], 10);
+      return total;
+    }
+  }
+
   const parts = trimmed.split(":").map((p) => parseInt(p, 10));
   if (parts.some((n) => isNaN(n))) return undefined;
-  if (parts.length === 1) return parts[0];
-  if (parts.length === 2) return parts[0] * 60 + parts[1];
-  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  if (parts.length === 1) return parts[0] * 60; // bare number = minutes
+  if (parts.length === 2) return parts[0] * 60 + parts[1]; // M:SS
+  if (parts.length === 3)
+    return parts[0] * 3600 + parts[1] * 60 + parts[2]; // H:MM:SS
   return undefined;
 }

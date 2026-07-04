@@ -8,7 +8,7 @@ export const dynamic = "force-dynamic";
  * GET /api/youtube-meta?videoId=...  (or ?url=...)
  *
  * Returns lightweight YouTube video metadata (title, author, thumbnail) using
- * the public oEmbed endpoint. Used by the YouTubeDialog to show a preview card
+ * the public oEmbed endpoint. Used by the YouTubeInlinePanel to show a preview card
  * with the thumbnail + title + channel as soon as the user pastes a valid URL,
  * so they can confirm "yes, this is the right video" before clicking Summarize.
  *

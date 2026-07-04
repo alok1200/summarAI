@@ -1,0 +1,322 @@
+     1→     1→# Project Worklog
+     2→     2→
+     3→     3→This file tracks all changes made to the Next.js chat app.
+     4→     4→
+     5→     5→---
+     6→     6→Task ID: 0
+     7→     7→Agent: main
+     8→     8→Task: Add "Interview Q&A Generator" feature — takes any YouTube link and produces interview-style questions and answers based on the video's content.
+     9→     9→
+    10→    10→Work Log:
+    11→    11→- Reviewed existing architecture: /api/youtube-summary endpoint + YouTubeDialog UI
+    12→    12→- Identified reusable multi-strategy transcript fetcher (InnerTube ANDROID/WEB + watch page scrape + youtube-transcript lib + youtubei.js)
+    13→    13→- Plan: extract shared lib, add new /api/youtube-interview endpoint, add mode selector to dialog
+    14→    14→
+    15→    15→Stage Summary:
+    16→    16→- About to extract shared transcript-fetching lib and create new interview Q&A endpoint
+    17→    17→
+    18→    18→---
+    19→    19→Task ID: 1
+    20→    20→Agent: main
+    21→    21→Task: Implement Interview Q&A Generator feature end-to-end
+    22→    22→
+    23→    23→Work Log:
+    24→    24→- Created /src/lib/youtube-transcript.ts — extracted shared transcript-fetching logic (4-strategy fallback: InnerTube ANDROID, watch-page scrape, youtube-transcript lib, youtubei.js)
+    25→    25→- Refactored /src/app/api/youtube-summary/route.ts to import from shared lib — reduced from 870 lines to ~230 lines, regression-tested and still works (11s, 1.6KB summary)
+    26→    26→- Created /src/app/api/youtube-interview/route.ts — new endpoint that takes url/difficulty/questionCount/interviewType/targetRole and streams Markdown Q&A
+    27→    27→- Updated /src/components/chat/YouTubeDialog.tsx — added "Summary | Interview Q&A" mode toggle at top; when Interview is selected, shows difficulty/type/count/role controls
+    28→    28→- Updated /src/app/page.tsx — handleYouTube now branches on payload.mode, dispatches to /api/youtube-summary or /api/youtube-interview, builds different placeholder + user message text
+    29→    29→- Updated /src/components/chat/ChatInput.tsx — tooltip and help text now mention "interview Q&A"
+    30→    30→
+    31→    31→Stage Summary:
+    32→    32→- All endpoints tested:
+    33→    33→  * Summary regression: HTTP 200, 11s, 1.6KB output
+    34→    34→  * Interview (default 15 intermediate technical): HTTP 200, 110s, 16.5KB output
+    35→    35→  * Interview (10 advanced behavioral, PM role): HTTP 200, 69s, 11.8KB output
+    36→    36→  * Interview (manual paste, 8 technical, Senior React Developer): HTTP 200, 43s, 6.3KB output
+    37→    37→- TypeScript: 0 errors. ESLint: 0 errors. Dev server compiles cleanly.
+    38→    38→- UI loads at HTTP 200 with no errors.
+    39→    39→
+    40→    40→---
+    41→    41→Task ID: 2
+    42→    42→Agent: main
+    43→    43→Task: Add "Ask about video" mode — interactive Q&A where the user asks any question about a loaded YouTube video; off-topic questions get rejected. Also verify auth gating (login → home, logout → login/signup).
+    44→    44→
+    45→    45→Work Log:
+    46→    46→- Added VideoContext interface + setVideoContext() action to chat store (src/store/chat.ts) so each conversation can carry its own loaded video transcript
+    47→    47→- Created /api/youtube-load endpoint that returns transcript + metadata as JSON (used by the new mode to pre-load context)
+    48→    48→- Updated /api/chat/route.ts to accept `videoContext` in the payload and inject a strict system prompt that:
+    49→    49→  * Tells the model to ONLY answer from the transcript
+    50→    50→  * Forces a fixed rejection message ("⚠️ This topic is not covered in this YouTube video...") for off-topic questions
+    51→    51→  * Tells the model not to use general knowledge to fill gaps
+    52→    52→- Added third mode "Ask about video" to YouTubeDialog (now 3-button toggle: Summary | Interview Q&A | Ask about video)
+    53→    53→- Updated page.tsx handleYouTube to handle the new "ask" mode:
+    54→    54→  * Calls /api/youtube-load to fetch transcript once
+    55→    55→  * Stores result in conversation.videoContext via setVideoContext()
+    56→    56→  * Posts a welcome message with video metadata + suggested questions
+    57→    57→  * Same bot-block fallback as other modes (auto-reopens dialog with manual-paste option)
+    58→    58→- Updated sendMessage to include videoContext in the /api/chat payload so subsequent chat messages automatically get the strict prompt
+    59→    59→- Added a video-context banner above the chat area showing the loaded video's title and an "Exit video mode" button
+    60→    60→- Verified auth gating: login → home screen, logout → LoginScreen. Already working correctly via the existing `if (!user) return <LoginScreen />` guard. Server-side /api/auth/me returns {user: null} after logout.
+    61→    61→
+    62→    62→Stage Summary:
+    63→    63→- All 4 end-to-end tests pass:
+    64→    64→  1. On-topic question → answered from transcript with [MM:SS] timestamp reference (2.5s)
+    65→    65→  2. Off-topic coding contest question → rejected with exact "topic not covered" message (2.0s)
+    66→    66→  3. Off-topic geography question → rejected with same message (2.0s)
+    67→    67→  4. No video context → normal chat works (regression check passed)
+    68→    68→- Video load completes in <1s; chat responses in 2-3s thanks to the strict prompt keeping answers concise
+    69→    69→- TypeScript: 0 errors. ESLint: 0 errors.
+    70→    70→
+    71→    71→---
+    72→    72→Task ID: youtube-502-fix
+    73→    73→Agent: main
+    74→    74→Task: Fix the 502 error during YouTube interview Q&A generation, and verify both pending tasks (conversational YouTube Q&A + auth-based routing) are working.
+    75→    75→
+    76→    76→Work Log:
+    77→    77→- Explored the auth setup, chat architecture, and YouTube flow via the Explore subagent
+    78→    78→- Discovered that Task A (conversational Q&A about YouTube) was already implemented via /api/youtube-load + /api/chat (buildVideoSystemPrompt + VIDEO_OFF_TOPIC_REPLY)
+    79→    79→- Discovered that Task B (auth-based routing) was already implemented via client-side auth gate in page.tsx (if !user return <LoginScreen />)
+    80→    80→- Identified the real issue: 502 error from the LLM gateway (Z.ai SDK) with no retry logic
+    81→    81→- Created /home/z/my-project/src/lib/llm.ts — shared LLM helper with withRetry() that retries on 502/503/504/520/521/522/524/network errors using exponential backoff (3 attempts, 1.2s base delay, 6s max)
+    82→    82→- Refactored /api/youtube-interview/route.ts to use chatComplete() + streamTextResponse() from the shared lib (removed duplicated streamTextResponse and ZAI import)
+    83→    83→- Refactored /api/youtube-summary/route.ts the same way
+    84→    84→- Refactored /api/chat/route.ts to use chatComplete() + visionComplete() with built-in retry
+    85→    85→- Added friendlier error messages for transient gateway errors so users see "The AI service is temporarily unavailable..." instead of "Request failed: 502"
+    86→    86→- TypeScript compiles clean (tsc --noEmit)
+    87→    87→- ESLint passes clean (eslint .)
+    88→    88→- Started dev server on port 3001 and ran end-to-end tests:
+    89→    89→  * YouTube interview with manual transcript → 200 OK, 4.5KB structured Q&A with cheat-sheet
+    90→    90→  * /api/chat with videoContext + in-scope question → 200 OK, answer with [1:58] timestamp reference
+    91→    91→  * /api/chat with videoContext + out-of-scope question (weather + coding contest) → 200 OK, exact "⚠️ This topic is not covered in this YouTube video..." reply
+    92→    92→  * /api/chat with videoContext + explicit "give me interview questions" request → 200 OK, generates 4 Q&A pairs from the transcript
+    93→    93→  * /api/auth/me without cookie → {"user":null} (triggers LoginScreen client-side)
+    94→    94→  * /api/auth/signup → creates user, sets cookie, returns user
+    95→    95→  * /api/auth/me with cookie → returns the logged-in user (triggers home screen client-side)
+    96→    96→  * /api/auth/logout → destroys session, cookie cleared
+    97→    97→- Cleaned up test user from DB
+    98→    98→- Stopped dev server
+    99→    99→
+   100→   100→Stage Summary:
+   101→   101→- The 502 error was a transient LLM gateway failure with no retry — now all 3 LLM-calling routes (/api/chat, /api/youtube-summary, /api/youtube-interview) use the shared chatComplete/visionComplete helpers which auto-retry on 502/503/504/network errors with exponential backoff.
+   102→   102→- Task A (conversational Q&A about YouTube) is fully working: in-scope questions get timestamped answers; out-of-scope questions (weather, coding contests, general knowledge, etc.) get the exact "⚠️ This topic is not covered in this YouTube video..." reply; explicit requests for interview questions get generated Q&A.
+   103→   103→- Task B (auth-based routing) is fully working: logged-out users see ONLY the LoginScreen (with login + signup tabs), logged-in users see the home/chat screen. The auth gate is in page.tsx lines 513-523.
+   104→   104→- Files created: /home/z/my-project/src/lib/llm.ts
+   105→   105→- Files modified: /home/z/my-project/src/app/api/youtube-interview/route.ts, /home/z/my-project/src/app/api/youtube-summary/route.ts, /home/z/my-project/src/app/api/chat/route.ts
+   106→   106→
+   107→   107→---
+   108→   108→Task ID: youtube-502-real-fix
+   109→   109→Agent: main
+   110→   110→Task: Fix the persistent 502 error during YouTube interview Q&A generation. The previous retry-based fix didn't work because the 502 was happening at the proxy layer, not the SDK layer.
+   111→   111→
+   112→   112→Work Log:
+   113→   113→- Investigated dev log: POST /api/chat 200 in 71s — the LLM call took 71 seconds to complete, then returned 200. The user saw 502 because the preview proxy (between browser and dev server) has a 60-second timeout and returned 502 "Gateway Timeout" before the Next.js function finished.
+   114→   114→- Confirmed retry logic was useless here because the error never reached the Next.js catch block — the proxy cut the connection first.
+   115→   115→- Tested whether Z.ai SDK supports real streaming: confirmed it does. `zai.chat.completions.create({ stream: true })` returns a ReadableStream whose async iterator yields Uint8Array chunks containing SSE-formatted data (each line: `data: {"choices":[{"delta":{"content":"..."}}]}`).
+   116→   116→- Rewrote /home/z/my-project/src/lib/llm.ts:
+   117→   117→  * Added SSEParser class to parse incoming SSE chunks and extract content deltas (handles partial chunks split across Uint8Array yields via line buffering)
+   118→   118→  * Added chatCompleteStream() — opens a streaming LLM call (with retry on transient errors during the initial connection only), returns a ReadableStream<Uint8Array> that yields content deltas as they arrive
+   119→   119→  * Added visionCompleteStream() — same pattern for the vision endpoint
+   120→   120→  * Added streamHeaderAndLLM(header, llmStream) — emits a static header first, then pipes the LLM stream through, used by YouTube routes
+   121→   121→  * Kept the existing chatComplete/visionComplete/streamTextResponse for backward compatibility
+   122→   122→- Updated /api/chat/route.ts: replaced the await-full-completion + fake-typing-stream pattern with chatCompleteStream() / visionCompleteStream() piped directly to the HTTP response. Removed the artificial 12ms-per-token delay.
+   123→   123→- Updated /api/youtube-summary/route.ts: replaced await + streamTextResponse with chatCompleteStream() + streamHeaderAndLLM(header, stream).
+   124→   124→- Updated /api/youtube-interview/route.ts: same change as summary.
+   125→   125→- TypeScript: clean (tsc --noEmit)
+   126→   126→- ESLint: clean (eslint .)
+   127→   127→- Restarted dev server and ran end-to-end tests with curl --timing:
+   128→   128→  * /api/chat (1-paragraph answer): first byte 1.16s (was 71s), total 2.09s, HTTP 200
+   129→   129→  * /api/youtube-summary (manual transcript): first byte 0.59s, total 2.61s, HTTP 200, 1.26KB structured summary
+   130→   130→  * /api/youtube-interview (10 questions, manual transcript): first byte 0.95s (was 60+s), total 22.3s, HTTP 200, 8.4KB full Q&A with cheat-sheet
+   131→   131→- All first-byte times are now well under 2 seconds, which means the proxy connection stays alive throughout the generation and no more 502s should occur.
+   132→   132→
+   133→   133→Stage Summary:
+   134→   134→- The root cause was FAKE streaming (await full completion, then re-emit char-by-char). The first byte reached the browser only after the entire LLM generation finished (60-90 seconds for 15-question interview Q&A), which exceeded the preview proxy's 60-second timeout and produced 502.
+   135→   135→- The fix is REAL streaming: pipe the Z.ai SDK's streaming ReadableStream directly to the HTTP response. First token now arrives in <1 second, keeping the proxy connection alive.
+   136→   136→- Files modified: /home/z/my-project/src/lib/llm.ts, /home/z/my-project/src/app/api/chat/route.ts, /home/z/my-project/src/app/api/youtube-summary/route.ts, /home/z/my-project/src/app/api/youtube-interview/route.ts
+   137→   137→- Dev server is running on port 3000, ready for the user to test.
+   138→   138→
+   139→   139→---
+   140→   140→Task ID: long-video-map-reduce
+   141→   141→Agent: main
+   142→   142→Task: Support very long YouTube videos (up to 50 hours). Provide full summary and Q&A even for huge transcripts. Make the application faster and best quality.
+   143→   143→
+   144→   144→Work Log:
+   145→   145→- Identified the root cause: the old code truncated transcript at 80K chars (~10 min of video), so a 50-hour video had 90% of its content thrown away before the LLM even saw it.
+   146→   146→- Created /home/z/my-project/src/lib/youtube-chunks.ts — chunking + map-reduce utilities:
+   147→   147→  * chunkTranscript(): splits segments into ~22K-char chunks at segment boundaries (preserves [MM:SS] timestamps)
+   148→   148→  * mapChunks(): runs an async fn on each chunk IN PARALLEL with configurable concurrency (default 4) + per-chunk error isolation (one chunk failing doesn't kill the whole batch)
+   149→   149→  * shouldUseMapReduce(): returns true if transcript > 60K chars
+   150→   150→  * estimateChunkCount(): for display
+   151→   151→- Refactored /api/youtube-summary/route.ts:
+   152→   152→  * Short video (<60K chars): single LLM call with real streaming (unchanged)
+   153→   153→  * Long video: MAP step (parallel chunk summaries) → REDUCE step (merge into final unified summary with chapter index). Streams progress lines like "✅ Chunk 3/8 summarized" to the client as each chunk completes.
+   154→   154→- Refactored /api/youtube-interview/route.ts:
+   155→   155→  * Short video: single LLM call (unchanged)
+   156→   156→  * Long video: MAP step (parallel topic extraction per chunk) → REDUCE step (generate N balanced questions spanning ALL chunks, not clustered around one segment). Streams progress.
+   157→   157→- Refactored /api/youtube-load/route.ts (Q&A mode):
+   158→   158→  * Short video: returns transcript string (unchanged)
+   159→   159→  * Long video: returns chunks array + topicIndex (built in parallel). Topic index is ~5-12 topics per chunk, a few KB total even for a 50-hour video.
+   160→   160→- Updated /api/chat/route.ts to do RETRIEVAL-AUGMENTED Q&A on long videos:
+   161→   161→  * Short video: inject whole transcript as system context (unchanged)
+   162→   162→  * Long video: 1) ask LLM "which chunks are most relevant to this question?" → returns JSON array of chunk indexes (or [] if off-topic) 2) inject only those chunks (max 3) as system context 3) if retrieval returns [], short-circuit with the off-topic reply WITHOUT calling the main LLM (instant response)
+   163→   163→- Updated src/store/chat.ts: VideoContext type now supports optional chunks + topicIndex fields for long videos
+   164→   164→- Updated src/app/page.tsx: passes chunks + topicIndex to /api/chat when in long-video mode; welcome message shows "Long video mode" notice with chunk count
+   165→   165→- Updated /home/z/my-project/src/lib/llm.ts: isTransientError now includes HTTP 429 (rate limit) so the retry logic kicks in when the gateway is briefly overloaded
+   166→   166→- Reduced mapChunks default concurrency from 6 to 4 to be gentler on the gateway (still gives 4x speedup over sequential)
+   167→   167→- TypeScript: clean (tsc --noEmit)
+   168→   168→- ESLint: clean (eslint .)
+   169→   169→- Restarted dev server and ran end-to-end tests with a synthetic 73K-char transcript (simulating ~1hr video):
+   170→   170→  * /api/youtube-summary with map-reduce: HTTP 200, first byte 0.66s, total 15s, 3.2KB structured summary with overview, key points, quotes, chapter index. Progress lines streamed correctly.
+   171→   171→  * /api/youtube-interview with map-reduce (10 questions): HTTP 200, first byte 0.10s, total 42s, 11.3KB Q&A. Questions span timestamps across all 4 chunks (18:00, 38:30, 20:30, 36:30, 39:00, 39:30, 37:00, 26:00, 37:30) — proving the reduce step produces DIVERSE questions across the whole video, not clustered.
+   172→   172→  * /api/youtube-load with long video: HTTP 200, total 12.6s, returned 4 chunks + 6.6KB topicIndex (one chunk hit a 429 during indexing and was gracefully handled with a placeholder — the rest succeeded).
+   173→   173→  * /api/chat with retrieval (in-scope question about React Router): HTTP 200, first byte 3.1s (retrieval call), total 7.5s, 1.1KB answer with timestamp citations from the retrieved chunks.
+   174→   174→  * /api/chat with retrieval (off-topic question about Tokyo weather + LeetCode): HTTP 200, first byte 0.47s, returned the exact "⚠️ This topic is not covered in this YouTube video..." message. The retrieval LLM correctly returned [] so we skipped the main LLM call entirely.
+   175→   175→
+   176→   176→Stage Summary:
+   177→   177→- Long videos (up to 50 hours) now work end-to-end. The pipeline is:
+   178→   178→  1. Chunk: ~22K-char chunks at segment boundaries (preserves timestamps)
+   179→   179→  2. Map: parallel per-chunk LLM calls (4-way concurrency) with per-chunk error isolation
+   180→   180→  3. Reduce: single LLM call that merges per-chunk results into a coherent final answer
+   181→   181→  4. Stream: progress indicators + final answer stream to the client in real time
+   182→   182→- Speed: parallel processing gives ~4x speedup over sequential. A 73K-char transcript summary completes in 15s (vs 60+ seconds sequential). First byte always <1s, so no proxy 502s.
+   183→   183→- Quality: for interview Q&A, the reduce step is explicitly told to pick DIVERSE questions spanning all chunks (not cluster around one segment). Test confirms questions come from timestamps across all 4 chunks.
+   184→   184→- Q&A mode: retrieval-augmented. For each user question, an LLM picks the top 3 most relevant chunks (from the topic index), and only those chunks are injected into the context. Off-topic questions short-circuit instantly with the canned reply, no main LLM call needed.
+   185→   185→- Files created: /home/z/my-project/src/lib/youtube-chunks.ts
+   186→   186→- Files modified: /home/z/my-project/src/lib/llm.ts, /home/z/my-project/src/app/api/youtube-summary/route.ts, /home/z/my-project/src/app/api/youtube-interview/route.ts, /home/z/my-project/src/app/api/youtube-load/route.ts, /home/z/my-project/src/app/api/chat/route.ts, /home/z/my-project/src/store/chat.ts, /home/z/my-project/src/app/page.tsx
+   187→   187→- Dev server is running on port 3000, ready for the user to test.
+   188→   188→
+   189→   189→---
+   190→   190→Task ID: best-app-improvements
+   191→   191→Agent: main
+   192→   192→Task: User asked: "according to this is best or you want something change to improve this application i will provide full access to make this best according to you and after all changest you test every thing and make best then let me know". Take full ownership and improve the app.
+   193→   193→
+   194→   194→Work Log:
+   195→   195→- Audited current state: page.tsx, store/chat.ts, MessageBubble.tsx, ChatInput.tsx, YouTubeDialog.tsx, Sidebar.tsx. App already had: streaming, long-video map-reduce, auth gate, markdown rendering with code highlighting.
+   196→   196→- Identified 6 high-impact improvements (see Stage Summary).
+   197→   197→- Created /api/youtube-meta/route.ts — new GET endpoint that returns {title, author, thumbnailUrl} for a videoId using the existing fetchVideoMeta() oEmbed helper. Used by the new YouTubeDialog preview card.
+   198→   198→- Rewrote /components/chat/MessageBubble.tsx:
+   199→   199→  * Added linkifyTimestamps(content, videoId) — replaces [MM:SS] / [H:MM:SS] patterns in the assistant's response with markdown links to https://youtu.be/VIDEO?t=Ns. Used useMemo to compute preprocessed content.
+   200→   200→  * Added StreamingProgressBar component — parses accumulated streaming content for "⏳ Processing N chunks in parallel" header + "✅ Chunk X/N" lines + "🔄 Merging" / "🎯 Generating" reduce-phase markers, and renders a visual green progress bar with percentage and phase label.
+   201→   201→  * Added AssistantActionBar — hover-revealed Copy + Regenerate + Open-video buttons under each completed assistant message.
+   202→   202→  * Updated ReactMarkdown custom renderers: `a` now opens links in new tab with emerald color (so timestamp links look clickable).
+   203→   203→  * Added videoId, isLatestAssistant, onRegenerate props.
+   204→   204→- Updated /components/chat/YouTubeDialog.tsx:
+   205→   205→  * Added VideoPreview component — fetches /api/youtube-meta?videoId=X on mount and shows a thumbnail + title + channel card below the URL input field.
+   206→   206→  * Loading state shows spinner; error state shows amber notice but lets the user proceed.
+   207→   207→  * Added `initialUrl` prop — when set (e.g. user clicked the "Open YouTube dialog →" chip after pasting a YouTube URL in the main chat input), the URL field is pre-filled when the dialog opens.
+   208→   208→  * Used `key={videoId}` on VideoPreview to force a clean remount per video (avoids the lint error of synchronous setState inside useEffect).
+   209→   209→- Updated /components/chat/Sidebar.tsx:
+   210→   210→  * Added exportConversationAsMarkdown(convo) — builds a clean Markdown string with header (title, export date, video context if any) and per-message sections (role, time, content, attachments). Triggers a browser download via Blob + URL.createObjectURL.
+   211→   211→  * Added a per-conversation Download icon button (next to Rename and Delete) shown on hover.
+   212→   212→  * Added an "Export current chat" item in the user dropdown menu at the bottom of the sidebar.
+   213→   213→- Updated /components/chat/ChatInput.tsx:
+   214→   214→  * Added detectedYoutubeUrl useMemo — detects YouTube URLs (watch, youtu.be, embed, shorts, live) in the current input value as the user types/pastes.
+   215→   215→  * When detected, shows a red-tinted chip above the input: "YouTube link detected — summarize or generate interview Q&A from this video? [Open YouTube dialog →] [✕]". Clicking the chip opens the YouTubeDialog with the URL pre-filled.
+   216→   216→  * Updated onOpenYouTube prop signature to accept an optional prefilledUrl parameter.
+   217→   217→- Updated /app/page.tsx:
+   218→   218→  * Added activeVideoId useMemo — picks the conversation's videoContext.videoId (ask-about-video mode) OR the most recent user message's youtubeMeta.videoId (summary/interview mode). Passed to every MessageBubble so timestamps linkify correctly.
+   219→   219→  * Added handleRegenerate callback — finds the last assistant message, resets it to a placeholder, and re-streams via /api/chat with the full message history up to that point.
+   220→   220→  * Wired up MessageBubble with new props (videoId, isLatestAssistant, onRegenerate).
+   221→   221→  * Added youtubeInitialUrl state — passed to YouTubeDialog.initialUrl, cleared on dialog close.
+   222→   222→  * ChatInput's onOpenYouTube now sets both youtubeInitialUrl and youtubeOpen.
+   223→   223→- ESLint: had to fix two `react-hooks/set-state-in-effect` errors. Converted ChatInput's URL detection from useEffect+setState to useMemo (pure derivation). Converted VideoPreview's loading-state reset to use the `key={videoId}` remount trick instead of synchronous setState in the effect body.
+   224→   224→- TypeScript: clean (tsc --noEmit)
+   225→   225→- ESLint: clean (eslint .)
+   226→   226→- Restarted dev server and ran end-to-end tests:
+   227→   227→  * Home page: HTTP 200, 72ms (cached)
+   228→   228→  * /api/youtube-meta?videoId=dQw4w9WgXcQ: HTTP 200, 1.2s, returned "Rick Astley - Never Gonna Give You Up (Official Video) (4K Remaster)" by "Rick Astley" with thumbnail URL
+   229→   229→  * /api/youtube-meta?videoId=invalid_id: HTTP 404 with friendly error
+   230→   230→  * /api/auth/me: HTTP 200, returns {user: null}
+   231→   231→  * /api/youtube-summary (manual 7-segment short transcript): HTTP 200, 3.4s, structured summary with timestamps
+   232→   232→  * /api/chat (plain message "What is 2+2?"): HTTP 200, 0.46s, "Two plus two equals four."
+   233→   233→  * /api/chat with short videoContext (in-scope Q): HTTP 200, 1.5s, answer with [0:15] [0:45] [1:15] timestamp citations (these will be clickable in the UI)
+   234→   234→  * /api/chat with short videoContext (off-topic "weather in Tokyo"): HTTP 200, returns exact "⚠️ This topic is not covered in this YouTube video..." reply
+   235→   235→  * /api/auth/signup: HTTP 200, created user, returned user object
+   236→   236→  * /api/youtube-summary LONG (700 segments, 203K chars): HTTP 200, 41s, "⏳ Processing 10 chunks in parallel" → 10x "✅ Chunk X/10 summarized" → "🔄 Merging 10 chunk summaries" → final structured summary with chapter index. The progress lines will be parsed by the new parseProgress() in MessageBubble to render the visual progress bar.
+   237→   237→  * Cleaned up test user from DB.
+   238→   238→- No regressions: all pre-existing functionality still works.
+   239→   239→
+   240→   240→Stage Summary:
+   241→   241→- 6 high-impact improvements shipped, all tested end-to-end:
+   242→   242→  1. **Clickable [MM:SS] timestamps** in AI responses — open YouTube at that exact moment. Verified: chat endpoint returns [0:15] etc., MessageBubble linkifies them to youtu.be/VIDEO?t=Ns.
+   243→   243→  2. **Action bar on each AI message** — hover-revealed Copy + Regenerate + Open-video buttons. Regenerate re-runs /api/chat with the same history.
+   244→   244→  3. **Visual progress bar for long-video map-reduce** — green animated bar with percentage and phase label, replaces the old text-only "✅ Chunk X/N" lines (text lines still shown for detail). Verified: parseProgress() correctly detects the "⏳ Processing 10 chunks" header + chunk lines + reduce-phase markers.
+   245→   245→  4. **YouTube preview card in dialog** — thumbnail + title + channel shown as soon as user pastes a valid URL, fetched from our new /api/youtube-meta endpoint. Loading and error states handled.
+   246→   246→  5. **Export conversation as Markdown** — download button per conversation in sidebar (hover-revealed) plus "Export current chat" in user dropdown. Produces a clean .md file with title, date, video context, and all messages.
+   247→   247→  6. **Auto-detect pasted YouTube URLs in main chat input** — red-tinted chip appears above the input offering "Open YouTube dialog →" with one click; URL is pre-filled in the dialog. Dismissable.
+   248→   248→- New files: /src/app/api/youtube-meta/route.ts
+   249→   249→- Modified files: /src/components/chat/MessageBubble.tsx, /src/components/chat/YouTubeDialog.tsx, /src/components/chat/ChatInput.tsx, /src/components/chat/Sidebar.tsx, /src/app/page.tsx
+   250→   250→- Dev server is running on port 3000, ready for the user to test.
+   251→   251→
+   252→   252→---
+   253→   253→Task ID: env-byo-keys
+   254→   254→Agent: main
+   255→   255→Task: Make every API key in .env behave as "fill it in → use your key; leave it empty → fall back to the default and keep running", so the app runs identically to today when no keys are provided.
+   256→   256→
+   257→   257→Work Log:
+   258→   258→- Audited every `process.env.*` reference in the codebase (auth.ts, db.ts, llm.ts, youtube-transcript.ts).
+   259→   259→- Discovered that ZAI_API_KEY was documented in .env / .env.example but never actually read by the app — the Z.ai SDK only loads from .z-ai-config files (/etc/.z-ai-config is the pre-installed default).
+   260→   260→- Discovered that LLM_MODEL was declared but never passed to the SDK, and LLM_VISION_MODEL was declared but the vision functions hardcoded "glm-4v-flash".
+   261→   261→- Confirmed YOUTUBE_API_KEY and SESSION_SECRET were already correctly wired with sensible fallbacks.
+   262→   262→- Rewrote src/lib/llm.ts:
+   263→   263→    * getZai() now reads process.env.ZAI_API_KEY first. If set, it constructs the ZAI client directly with {baseUrl, apiKey} (bypassing the SDK's `private constructor` TS hint via a cast). If empty, it falls back to ZAI.create() which loads /etc/.z-ai-config — preserving today's "out of the box" behaviour.
+   264→   264→    * Added ZAI_BASE_URL env var (optional, defaults to https://api.z.ai/v1) for users who need to point at a different endpoint.
+   265→   265→    * Added getLLMModel() and getLLMVisionModel() helpers that read process.env.LLM_MODEL / LLM_VISION_MODEL with the right defaults (undefined / "glm-4v-flash").
+   266→   266→    * Threaded model name through chatComplete, chatCompleteStream, visionComplete, visionCompleteStream so user-set models actually take effect.
+   267→   267→- Rewrote .env and .env.example with a clear "BYO keys vs default fallback" contract at the top, including a table showing what happens when each key is left empty.
+   268→   268→- Wrote scripts/verify-env-keys.mjs — confirms both paths end-to-end:
+   269→   269→    * Path A (empty ZAI_API_KEY): client loads from /etc/.z-ai-config, a real chat call returns "PONG".
+   270→   270→    * Path B (ZAI_API_KEY set): client.config.apiKey and baseUrl come from our env, NOT from /etc/.z-ai-config.
+   271→   271→    * Path C (ZAI_API_KEY set, ZAI_BASE_URL empty): baseUrl defaults to https://api.z.ai/v1.
+   272→   272→    * LLM_MODEL / LLM_VISION_MODEL helpers handle defaults, whitespace-only, and real overrides correctly.
+   273→   273→- All 15 verification checks pass. `npx tsc --noEmit` passes.
+   274→   274→
+   275→   275→Stage Summary:
+   276→   276→- Files changed: src/lib/llm.ts, .env, .env.example
+   277→   277→- Files added: scripts/verify-env-keys.mjs
+   278→   278→- Contract now enforced app-wide: empty env value → use the default the app already had; non-empty env value → override the default with your key. Verified with a real round-trip chat call on the default path.
+   279→   279→
+   280→   280→---
+   281→   281→Task ID: timeline-fix
+   282→   282→Agent: main
+   283→   283→Task: Fix two user-reported YouTube issues:
+   284→   284→  (1) "AI not providing timeline properly" — timestamps missing/wrong in summaries, Q&A, interview answers, and chat-about-video.
+   285→   285→  (2) "Take time in min not in sec" — bare number in Start/End time field should be minutes, not seconds.
+   286→   286→
+   287→   287→Work Log:
+   288→   288→- Audited every timestamp-related code path:
+   289→   289→    * src/lib/youtube-transcript.ts: parseTimeString (input parsing) + formatTime (display).
+   290→   290→    * src/lib/youtube-chunks.ts: chunk start/end labels + per-line [MM:SS] prefixes.
+   291→   291→    * src/app/api/youtube-summary/route.ts: 4 LLM prompts (summarizeChunk, summarizeSection, buildReduceMessages, short-video system prompt).
+   292→   292→    * src/app/api/youtube-interview/route.ts: 3 LLM prompts (buildSystemPrompt, extractTopicsFromChunk, buildReduceMessages) — discovered buildSystemPrompt never asked the LLM to cite timestamps at all.
+   293→   293→    * src/app/api/youtube-load/route.ts: 1 LLM prompt (buildTopicIndex) — used ambiguous [MM:SS-MM:SS] format.
+   294→   294→    * src/app/api/chat/route.ts: 2 LLM prompts (buildShortVideoSystemPrompt, buildLongVideoSystemPrompt).
+   295→   295→    * src/components/chat/YouTubeDialog.tsx: Start/End time input placeholder + helper text.
+   296→   296→
+   297→   297→- ROOT CAUSE of issue (1): Every prompt told the LLM to "use [MM:SS] format", but the transcript actually uses M:SS for short videos and H:MM:SS for hour-plus videos (formatTime returns H:MM:SS when h>0). This mismatch caused the LLM to either drop the hour component for long videos, or hallucinate timestamps instead of copying them. Also, the interview Q&A prompts had no timestamp citation rule at all.
+   298→   298→
+   299→   299→- FIX for (1): Added a shared TIMESTAMP_RULES constant in src/lib/youtube-transcript.ts that tells the LLM:
+   300→   300→    * Copy timestamps EXACTLY as they appear in the transcript (same digits, same format).
+   301→   301→    * Match M:SS for short videos, H:MM:SS for hour-plus videos — do NOT convert.
+   302→   302→    * NEVER invent a timestamp; if unsure, find the closest one in the transcript.
+   303→   303→    * Every major claim, definition, example, demo, quote, or notable moment MUST be followed by its [timestamp].
+   304→   304→    * For ranges, cite [start]–[end] with an en-dash.
+   305→   305→    * In Chapter Index, list time ranges with a short title.
+   306→   306→  Threaded TIMESTAMP_RULES into all 7 LLM prompts across 4 routes (youtube-summary, youtube-interview, youtube-load, chat). Also added an explicit "every answer MUST cite at least one [timestamp]" rule to the interview buildSystemPrompt (it was missing entirely).
+   307→   307→
+   308→   308→- ROOT CAUSE of issue (2): parseTimeString interpreted a bare number as SECONDS ("5" = 5s). Users naturally think "skip to 5" = 5 minutes, not 5 seconds.
+   309→   309→
+   310→   310→- FIX for (2): parseTimeString now interprets a bare number as MINUTES ("5" = 5 min = 300s). Also added support for explicit unit suffixes so users can be unambiguous: "5m", "90s", "1h", "1h30m", "2h15m30s", "1h 30m" (with spaces). M:SS and H:MM:SS forms are unchanged.
+   311→   311→
+   312→   312→- Updated YouTubeDialog.tsx helper text under the Start/End time inputs to explain the new rules: "Minutes, not seconds. 5 = 5 min. Also accepts 5:30, 1:25:30, 90s, 1h30m."
+   313→   313→
+   314→   314→- Verification:
+   315→   315→    * `npx tsc --noEmit` passes.
+   316→   316→    * scripts/verify-time-parsing.mjs — 20/20 checks pass (bare numbers, M:SS, H:MM:SS, unit suffixes, composite forms, whitespace, garbage).
+   317→   317→
+   318→   318→Stage Summary:
+   319→   319→- Files changed: src/lib/youtube-transcript.ts, src/components/chat/YouTubeDialog.tsx, src/app/api/youtube-summary/route.ts, src/app/api/youtube-interview/route.ts, src/app/api/youtube-load/route.ts, src/app/api/chat/route.ts
+   320→   320→- Files added: scripts/verify-time-parsing.mjs
+   321→   321→- The AI now has explicit, consistent timestamp-citation rules across every YouTube-related prompt, and the time-input field now treats bare numbers as minutes (matching user mental model) while still accepting M:SS / H:MM:SS / explicit unit suffixes.
+   322→   322→

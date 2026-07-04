@@ -192,7 +192,7 @@ export function ChatInput({
               disabled={isStreaming}
               className="flex-shrink-0 rounded-md bg-red-600 hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed px-2 py-0.5 text-[11px] font-medium text-white transition-colors"
             >
-              Open YouTube dialog →
+              Open YouTube panel →
             </button>
             <button
               type="button"

@@ -319,3 +319,32 @@ Stage Summary:
 - Files changed: src/lib/youtube-transcript.ts, src/components/chat/YouTubeDialog.tsx, src/app/api/youtube-summary/route.ts, src/app/api/youtube-interview/route.ts, src/app/api/youtube-load/route.ts, src/app/api/chat/route.ts
 - Files added: scripts/verify-time-parsing.mjs
 - The AI now has explicit, consistent timestamp-citation rules across every YouTube-related prompt, and the time-input field now treats bare numbers as minutes (matching user mental model) while still accepting M:SS / H:MM:SS / explicit unit suffixes.
+
+---
+Task ID: single-page-youtube
+Agent: main
+Task: Consolidate the YouTube flow onto a single page — no second modal/page for the URL + mode + time-range + instructions. User wants everything in the same place.
+
+Work Log:
+- Reviewed current architecture: clicking the YouTube toolbar button or pasting a YouTube URL opened a `<Dialog>` modal (Radix UI) — a "second page" layered on top of the chat. The user explicitly asked to remove that second page.
+- Created src/components/chat/YouTubeInlinePanel.tsx — a new component that contains the EXACT same fields as the old YouTubeDialog (URL + live video preview, mode toggle, fetch-mode toggle, manual transcript textarea, time-range, interview options, custom instructions), but renders as an inline panel above where the ChatInput normally sits. No modal, no overlay, no second page — the user stays on the same chat page the whole time.
+- Updated src/app/page.tsx:
+    * Replaced `import { YouTubeDialog }` with `import { YouTubeInlinePanel }`.
+    * Removed the `<YouTubeDialog>` modal that was a sibling of the main flex column.
+    * In the main column, swapped from always-rendered `<ChatInput>` to a ternary: when `youtubeOpen === true`, render `<YouTubeInlinePanel>` (which has all the YouTube fields + Submit/Cancel buttons); when `youtubeOpen === false`, render `<ChatInput>` as before. The two components trade places in the same screen slot, so the user never leaves the chat page.
+    * The YouTube toolbar button in ChatInput and the "YouTube link detected" chip in ChatInput still call `onOpenYouTube(...)` — only difference is the chip's button label changed from "Open YouTube dialog →" to "Open YouTube panel →".
+    * All the existing plumbing still works: `youtubeOpen`, `youtubeInitialUrl`, `youtubeBotHint` state in page.tsx is unchanged. The panel's `onClose` clears `youtubeInitialUrl` exactly like the dialog's `onOpenChange(false)` used to. The `handleYouTube` callback is unchanged, so summary / interview / ask-about-video / bot-block flows all still work.
+    * Bonus: fixed the local `parseTimeToSec` helper in page.tsx to treat a bare number as MINUTES (was previously seconds) — matches the backend `parseTimeString` rule from the previous task. This is display-only (the `meta.startTime` field on the chat bubble), but consistency matters.
+- Updated src/components/chat/ChatInput.tsx: chip button label "Open YouTube dialog →" → "Open YouTube panel →".
+- Deleted src/components/chat/YouTubeDialog.tsx — no longer imported anywhere.
+- Updated two stale comments that mentioned "YouTubeDialog" (in page.tsx and youtube-meta/route.ts) to say "YouTubeInlinePanel" instead.
+- Verification:
+    * `npx tsc --noEmit` — passes, no output.
+    * `npx eslint .` — passes, no output.
+    * Dev server still serving: GET / → 200, GET /api/youtube-meta?videoId=dQw4w9WgXcQ → 200, GET /api/auth/me → 200.
+
+Stage Summary:
+- Files added: src/components/chat/YouTubeInlinePanel.tsx
+- Files changed: src/app/page.tsx, src/components/chat/ChatInput.tsx, src/app/api/youtube-meta/route.ts (comment only)
+- Files deleted: src/components/chat/YouTubeDialog.tsx
+- The YouTube summarization / interview / ask-about-video flow is now a single-page experience: the user pastes a URL and configures all the options (mode, time range, instructions, interview settings) in an inline panel that appears where the chat input normally sits — no second modal, no layered "page". Submitting the panel streams the result into the same chat conversation below; cancelling the panel returns the user to the normal chat input.

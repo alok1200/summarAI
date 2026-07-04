@@ -1,0 +1,820 @@
+     1→"use client";
+     2→
+     3→import { useEffect, useRef, useState, useCallback, useMemo } from "react";
+     4→import { PanelLeftOpen, Sparkles, Loader2, Youtube } from "lucide-react";
+     5→import {
+     6→  useChatStore,
+     7→  type ChatMessage,
+     8→  type Attachment,
+     9→  type YouTubeMeta,
+    10→  type VideoContext,
+    11→} from "@/store/chat";
+    12→import { useAuth } from "@/store/auth";
+    13→import { Sidebar } from "@/components/chat/Sidebar";
+    14→import { MessageBubble } from "@/components/chat/MessageBubble";
+    15→import { ChatInput } from "@/components/chat/ChatInput";
+    16→import { EmptyState } from "@/components/chat/EmptyState";
+    17→import { LoginScreen } from "@/components/chat/LoginScreen";
+    18→import {
+    19→  YouTubeDialog,
+    20→  type YouTubeSubmitPayload,
+    21→} from "@/components/chat/YouTubeDialog";
+    22→import { cn } from "@/lib/utils";
+    23→
+    24→function genId() {
+    25→  return (
+    26→    Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
+    27→  );
+    28→}
+    29→
+    30→export default function Home() {
+    31→  const {
+    32→    conversations,
+    33→    activeId,
+    34→    isStreaming,
+    35→    createConversation,
+    36→    setActive,
+    37→    appendMessage,
+    38→    updateMessage,
+    39→    setStreaming,
+    40→    setVideoContext,
+    41→  } = useChatStore();
+    42→
+    43→  const [sidebarOpen, setSidebarOpen] = useState(true);
+    44→  const [hasHydrated, setHasHydrated] = useState(false);
+    45→  const [youtubeOpen, setYoutubeOpen] = useState(false);
+    46→  const [youtubeBotHint, setYoutubeBotHint] = useState<string | null>(null);
+    47→  /** Pre-filled URL for the YouTubeDialog — set when the user clicks the
+    48→   * "Open YouTube dialog →" chip after pasting a YouTube link. */
+    49→  const [youtubeInitialUrl, setYoutubeInitialUrl] = useState<string | undefined>(undefined);
+    50→  const scrollRef = useRef<HTMLDivElement>(null);
+    51→  const abortRef = useRef<AbortController | null>(null);
+    52→
+    53→  const { user, loading: authLoading, fetchMe } = useAuth();
+    54→
+    55→  // Verify the session cookie ONCE on the initial app load. After a
+    56→  // successful login, setUser() is called from the LoginScreen with the
+    57→  // user object returned by the POST response — at that point authLoading
+    58→  // is already false, so this effect skips the redundant (and potentially
+    59→  // failing) re-fetch that was previously kicking users back to the
+    60→  // login screen.
+    61→  useEffect(() => {
+    62→    if (authLoading) {
+    63→      fetchMe();
+    64→    }
+    65→    // Intentionally empty deps — we only want this to run on the very first
+    66→    // mount, not on every authLoading/fetchMe change.
+    67→  }, []);
+    68→
+    69→  useEffect(() => {
+    70→    setHasHydrated(true);
+    71→  }, []);
+    72→
+    73→  useEffect(() => {
+    74→    if (!hasHydrated) return;
+    75→    const state = useChatStore.getState();
+    76→    if (state.conversations.length === 0) {
+    77→      state.createConversation();
+    78→    } else if (!state.activeId) {
+    79→      state.setActive(state.conversations[0].id);
+    80→    }
+    81→  }, [hasHydrated]);
+    82→
+    83→  useEffect(() => {
+    84→    if (scrollRef.current) {
+    85→      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    86→    }
+    87→  }, [conversations, activeId]);
+    88→
+    89→  const activeConversation = conversations.find((c) => c.id === activeId);
+    90→  const messages = activeConversation?.messages ?? [];
+    91→  const videoContext = activeConversation?.videoContext;
+    92→
+    93→  /**
+    94→   * Compute the "active" YouTube video ID for linkifying [MM:SS] timestamps
+    95→   * in assistant messages. Preference order:
+    96→   *   1. The conversation's videoContext (ask-about-video mode)
+    97→   *   2. The most recent user message with a youtubeMeta (summary / interview mode)
+    98→   */
+    99→  const activeVideoId = useMemo<string | undefined>(() => {
+   100→    if (videoContext?.videoId) return videoContext.videoId;
+   101→    for (let i = messages.length - 1; i >= 0; i--) {
+   102→      const m = messages[i];
+   103→      if (m.role === "user" && m.youtubeMeta?.videoId) {
+   104→        return m.youtubeMeta.videoId;
+   105→      }
+   106→    }
+   107→    return undefined;
+   108→  }, [videoContext, messages]);
+   109→
+   110→  /**
+   111→   * Regenerate the most recent assistant response: replace its content with
+   112→   * a placeholder and re-run the conversation through the same endpoint that
+   113→   * produced it the first time. We detect which endpoint by inspecting the
+   114→   * last user message — if it has youtubeMeta, dispatch based on its content
+   115→   * ("Generate N interview questions" → interview endpoint, "Summarize" →
+   116→   * summary endpoint, otherwise → /api/chat).
+   117→   */
+   118→  const handleRegenerate = useCallback(async () => {
+   119→    if (!activeConversation || isStreaming) return;
+   120→    const msgs = activeConversation.messages;
+   121→    if (msgs.length < 2) return;
+   122→
+   123→    // Find the last assistant message and the user message right before it.
+   124→    let lastAssistantIdx = -1;
+   125→    for (let i = msgs.length - 1; i >= 0; i--) {
+   126→      if (msgs[i].role === "assistant") {
+   127→        lastAssistantIdx = i;
+   128→        break;
+   129→      }
+   130→    }
+   131→    if (lastAssistantIdx <= 0) return;
+   132→    const lastUserMsg = msgs[lastAssistantIdx - 1];
+   133→    if (lastUserMsg.role !== "user") return;
+   134→
+   135→    // Reset the assistant message content to a placeholder.
+   136→    const assistantMsgId = msgs[lastAssistantIdx].id;
+   137→    updateMessage(activeConversation.id, assistantMsgId, "⏳ Regenerating…");
+   138→    setStreaming(true);
+   139→    const controller = new AbortController();
+   140→    abortRef.current = controller;
+   141→
+   142→    try {
+   143→      // Reconstruct the request — for /api/chat we send the full message
+   144→      // history up to (and including) the user message. For YouTube summary /
+   145→      // interview endpoints we don't have the original payload anymore, so we
+   146→      // just re-run /api/chat with the user's text content as the prompt.
+   147→      const priorMessages = msgs
+   148→        .slice(0, lastAssistantIdx + 1)
+   149→        .filter((m) => m.content.trim() !== "")
+   150→        .map((m) => ({
+   151→          role: m.role,
+   152→          content: m.content,
+   153→          attachments: m.attachments,
+   154→        }));
+   155→
+   156→      const payload: Record<string, unknown> = { messages: priorMessages };
+   157→      if (videoContext) {
+   158→        payload.videoContext = {
+   159→          url: videoContext.url,
+   160→          videoId: videoContext.videoId,
+   161→          title: videoContext.title,
+   162→          author: videoContext.author,
+   163→          transcript: videoContext.transcript,
+   164→          chunks: videoContext.chunks,
+   165→          topicIndex: videoContext.topicIndex,
+   166→        };
+   167→      }
+   168→
+   169→      const res = await fetch("/api/chat", {
+   170→        method: "POST",
+   171→        headers: { "Content-Type": "application/json" },
+   172→        body: JSON.stringify(payload),
+   173→        signal: controller.signal,
+   174→      });
+   175→      if (!res.ok || !res.body) {
+   176→        const errBody = await res.json().catch(() => ({}));
+   177→        throw new Error(errBody?.error || `Request failed: ${res.status}`);
+   178→      }
+   179→      const reader = res.body.getReader();
+   180→      const decoder = new TextDecoder();
+   181→      let acc = "";
+   182→      while (true) {
+   183→        const { done, value } = await reader.read();
+   184→        if (done) break;
+   185→        acc += decoder.decode(value, { stream: true });
+   186→        updateMessage(activeConversation.id, assistantMsgId, acc);
+   187→      }
+   188→      if (!acc.trim()) {
+   189→        updateMessage(
+   190→          activeConversation.id,
+   191→          assistantMsgId,
+   192→          "_(No response received.)_"
+   193→        );
+   194→      }
+   195→    } catch (err: unknown) {
+   196→      if ((err as Error)?.name === "AbortError") {
+   197→        // keep partial
+   198→      } else {
+   199→        const message =
+   200→          err instanceof Error ? err.message : "Something went wrong.";
+   201→        updateMessage(
+   202→          activeConversation.id,
+   203→          assistantMsgId,
+   204→          `⚠️ **Error:** ${message}`
+   205→        );
+   206→      }
+   207→    } finally {
+   208→      setStreaming(false);
+   209→      abortRef.current = null;
+   210→    }
+   211→  }, [activeConversation, isStreaming, setStreaming, updateMessage, videoContext]);
+   212→
+   213→  /**
+   214→   * Core streaming helper: appends a user message + empty assistant message,
+   215→   * then POSTs to `endpoint` with `payload`, streaming the response into the
+   216→   * assistant placeholder.
+   217→   *
+   218→   * If the server responds with `{ code: "BOT_BLOCKED" }`, this helper calls
+   219→   * `onBotBlocked` instead of writing an error into the message bubble.
+   220→   */
+   221→  const runStream = useCallback(
+   222→    async (
+   223→      userMessage: ChatMessage,
+   224→      endpoint: string,
+   225→      payload: unknown,
+   226→      assistantPrefix?: string,
+   227→      onBotBlocked?: (message: string) => void
+   228→    ) => {
+   229→      let convoId = activeId;
+   230→      if (!convoId) {
+   231→        convoId = createConversation();
+   232→      }
+   233→
+   234→      appendMessage(convoId, userMessage);
+   235→
+   236→      const assistantMsg: ChatMessage = {
+   237→        id: genId() + "a",
+   238→        role: "assistant",
+   239→        content: assistantPrefix ?? "",
+   240→        createdAt: Date.now(),
+   241→      };
+   242→      appendMessage(convoId, assistantMsg);
+   243→
+   244→      setStreaming(true);
+   245→      const controller = new AbortController();
+   246→      abortRef.current = controller;
+   247→
+   248→      try {
+   249→        const res = await fetch(endpoint, {
+   250→          method: "POST",
+   251→          headers: { "Content-Type": "application/json" },
+   252→          body: JSON.stringify(payload),
+   253→          signal: controller.signal,
+   254→        });
+   255→
+   256→        if (!res.ok) {
+   257→          let errMsg = `Request failed: ${res.status}`;
+   258→          let errCode: string | undefined;
+   259→          let errMeta: { title?: string; author?: string; thumbnailUrl?: string } | undefined;
+   260→          try {
+   261→            const errBody = await res.json();
+   262→            if (errBody?.error) errMsg = errBody.error;
+   263→            errCode = errBody?.code;
+   264→            errMeta = errBody?.videoMeta;
+   265→          } catch {
+   266→            // ignore parse error
+   267→          }
+   268→          if (errCode === "BOT_BLOCKED" && onBotBlocked) {
+   269→            onBotBlocked(errMsg);
+   270→            // Replace the placeholder assistant message with a helpful note
+   271→            // that includes the video title (when available) so the user has
+   272→            // confirmation that this is the right video.
+   273→            const metaLine = errMeta?.title
+   274→              ? `**Video:** ${errMeta.title}${errMeta.author ? ` — ${errMeta.author}` : ""}\n\n`
+   275→              : "";
+   276→            updateMessage(
+   277→              convoId,
+   278→              assistantMsg.id,
+   279→              `⚠️ **YouTube blocked the auto-fetch for this video.**\n\n` +
+   280→                metaLine +
+   281→                `YouTube is asking us to sign in to confirm we're not a bot — ` +
+   282→                `this happens on videos with stricter bot protection (music videos, ` +
+   283→                `TED talks, livestreams, etc.).\n\n` +
+   284→                `**How to still get your summary:**\n` +
+   285→                `1. Click the **"Open video on YouTube"** button in the dialog (or open the video yourself)\n` +
+   286→                `2. Below the video, click **"… More"** → **"Show transcript"**\n` +
+   287→                `3. Copy the transcript text from the panel that opens\n` +
+   288→                `4. Paste it into the **"Paste transcript manually"** box in the dialog\n` +
+   289→                `5. Click **Summarize** — you'll get your summary in seconds`
+   290→            );
+   291→          } else {
+   292→            throw new Error(errMsg);
+   293→          }
+   294→          return;
+   295→        }
+   296→        if (!res.body) throw new Error("No response body");
+   297→
+   298→        const reader = res.body.getReader();
+   299→        const decoder = new TextDecoder();
+   300→        let acc = assistantPrefix ?? "";
+   301→        while (true) {
+   302→          const { done, value } = await reader.read();
+   303→          if (done) break;
+   304→          acc += decoder.decode(value, { stream: true });
+   305→          updateMessage(convoId, assistantMsg.id, acc);
+   306→        }
+   307→        if (!acc.trim()) {
+   308→          updateMessage(
+   309→            convoId,
+   310→            assistantMsg.id,
+   311→            "_(No response received.)_"
+   312→          );
+   313→        }
+   314→      } catch (err: unknown) {
+   315→        if ((err as Error)?.name === "AbortError") {
+   316→          // keep whatever we have so far
+   317→        } else {
+   318→          const message =
+   319→            err instanceof Error ? err.message : "Something went wrong.";
+   320→          updateMessage(
+   321→            convoId,
+   322→            assistantMsg.id,
+   323→            `⚠️ **Error:** ${message}`
+   324→          );
+   325→        }
+   326→      } finally {
+   327→        setStreaming(false);
+   328→        abortRef.current = null;
+   329→      }
+   330→    },
+   331→    [activeId, appendMessage, createConversation, setStreaming, updateMessage]
+   332→  );
+   333→
+   334→  const sendMessage = useCallback(
+   335→    async (text: string, attachments: Attachment[]) => {
+   336→      if (!text.trim() && attachments.length === 0) return;
+   337→
+   338→      const userMsg: ChatMessage = {
+   339→        id: genId(),
+   340→        role: "user",
+   341→        content: text,
+   342→        createdAt: Date.now(),
+   343→        attachments: attachments.length > 0 ? attachments : undefined,
+   344→      };
+   345→
+   346→      // Build the payload from current conversation history + new user message.
+   347→      const state = useChatStore.getState();
+   348→      const convoId = activeId ?? state.conversations[0]?.id;
+   349→      const existing = state.conversations.find((c) => c.id === convoId);
+   350→      const priorMessages = (existing?.messages ?? [])
+   351→        .filter((m) => m.content.trim() !== "")
+   352→        .map((m) => ({
+   353→          role: m.role,
+   354→          content: m.content,
+   355→          attachments: m.attachments,
+   356→        }));
+   357→
+   358→      // If the conversation has a video context ("ask about video" mode),
+   359→      // send it along so /api/chat can inject the transcript as the system
+   360→      // prompt and enforce the "only answer from the transcript" rule.
+   361→      const videoCtx = existing?.videoContext;
+   362→
+   363→      const payload: Record<string, unknown> = {
+   364→        messages: [
+   365→          ...priorMessages,
+   366→          {
+   367→            role: "user" as const,
+   368→            content: text,
+   369→            attachments: attachments.length > 0 ? attachments : undefined,
+   370→          },
+   371→        ],
+   372→      };
+   373→      if (videoCtx) {
+   374→        payload.videoContext = {
+   375→          url: videoCtx.url,
+   376→          videoId: videoCtx.videoId,
+   377→          title: videoCtx.title,
+   378→          author: videoCtx.author,
+   379→          // For short videos: pass transcript directly.
+   380→          // For long videos: pass chunks + topicIndex instead (chat route
+   381→          // does retrieval to pick the most relevant chunks per question).
+   382→          transcript: videoCtx.transcript,
+   383→          chunks: videoCtx.chunks,
+   384→          topicIndex: videoCtx.topicIndex,
+   385→        };
+   386→      }
+   387→
+   388→      await runStream(userMsg, "/api/chat", payload);
+   389→    },
+   390→    [activeId, runStream]
+   391→  );
+   392→
+   393→  const handleYouTube = useCallback(
+   394→    async (payload: YouTubeSubmitPayload) => {
+   395→      const startSec = parseTimeToSec(payload.startTime);
+   396→      const endSec = parseTimeToSec(payload.endTime);
+   397→      const isInterview = payload.mode === "interview";
+   398→      const isAsk = payload.mode === "ask";
+   399→      const isManual = !!payload.transcript;
+   400→
+   401→      const meta: YouTubeMeta = {
+   402→        url: payload.url,
+   403→        videoId: payload.videoId,
+   404→        startTime: startSec,
+   405→        endTime: endSec,
+   406→        instructions: payload.instructions || undefined,
+   407→      };
+   408→
+   409→      // ---------- "Ask about video" mode ----------
+   410→      // This mode is special: it doesn't stream a generated answer. Instead,
+   411→      // we fetch the transcript once via /api/youtube-load, store it as the
+   412→      // conversation's videoContext, and post a welcome message. Subsequent
+   413→      // chat messages in this conversation automatically include the
+   414→      // transcript as system context (see sendMessage above).
+   415→      if (isAsk) {
+   416→        let convoId = activeId;
+   417→        if (!convoId) {
+   418→          convoId = createConversation();
+   419→        }
+   420→
+   421→        // User-side "loaded video" message
+   422→        const userMsg: ChatMessage = {
+   423→          id: genId(),
+   424→          role: "user",
+   425→          content:
+   426→            `Load this YouTube video so I can ask questions about it: ${payload.url}` +
+   427→            (startSec !== undefined || endSec !== undefined
+   428→              ? ` (from ${payload.startTime || "0:00"} to ${
+   429→                  payload.endTime || "end"
+   430→                })`
+   431→              : "") +
+   432→            (isManual ? " (using a transcript I pasted manually)" : ""),
+   433→          createdAt: Date.now(),
+   434→          youtubeMeta: meta,
+   435→        };
+   436→        appendMessage(convoId, userMsg);
+   437→
+   438→        // Assistant placeholder while we fetch the transcript
+   439→        const assistantMsg: ChatMessage = {
+   440→          id: genId() + "a",
+   441→          role: "assistant",
+   442→          content: isManual
+   443→            ? "⏳ Loading your pasted transcript…"
+   444→            : "⏳ Fetching transcript from YouTube…",
+   445→          createdAt: Date.now(),
+   446→        };
+   447→        appendMessage(convoId, assistantMsg);
+   448→        setStreaming(true);
+   449→
+   450→        try {
+   451→          const res = await fetch("/api/youtube-load", {
+   452→            method: "POST",
+   453→            headers: { "Content-Type": "application/json" },
+   454→            body: JSON.stringify({
+   455→              url: payload.url,
+   456→              startTime: payload.startTime,
+   457→              endTime: payload.endTime,
+   458→              transcript: payload.transcript,
+   459→            }),
+   460→          });
+   461→
+   462→          if (!res.ok) {
+   463→            let errMsg = `Request failed: ${res.status}`;
+   464→            let errCode: string | undefined;
+   465→            let errMeta:
+   466→              | { title?: string; author?: string; thumbnailUrl?: string }
+   467→              | undefined;
+   468→            try {
+   469→              const errBody = await res.json();
+   470→              if (errBody?.error) errMsg = errBody.error;
+   471→              errCode = errBody?.code;
+   472→              errMeta = errBody?.videoMeta;
+   473→            } catch {
+   474→              // ignore
+   475→            }
+   476→            if (errCode === "BOT_BLOCKED") {
+   477→              // Reopen dialog so the user can paste manually
+   478→              setYoutubeBotHint(errMsg);
+   479→              setYoutubeOpen(true);
+   480→              const metaLine = errMeta?.title
+   481→                ? `**Video:** ${errMeta.title}${
+   482→                    errMeta.author ? ` — ${errMeta.author}` : ""
+   483→                  }\n\n`
+   484→                : "";
+   485→              updateMessage(
+   486→                convoId,
+   487→                assistantMsg.id,
+   488→                `⚠️ **YouTube blocked the auto-fetch for this video.**\n\n` +
+   489→                  metaLine +
+   490→                  `Please switch to **"Paste transcript manually"** in the dialog and try again.`
+   491→              );
+   492→            } else {
+   493→              updateMessage(
+   494→                convoId,
+   495→                assistantMsg.id,
+   496→                `⚠️ **Error:** ${errMsg}`
+   497→              );
+   498→            }
+   499→            return;
+   500→          }
+   501→
+   502→          const data = (await res.json()) as {
+   503→            title: string;
+   504→            author: string;
+   505→            url: string;
+   506→            videoId: string;
+   507→            transcript: string | null;
+   508→            chunks: any[] | null;
+   509→            topicIndex: string | null;
+   510→            segmentCount: number;
+   511→            startTime: number;
+   512→            endTime: number;
+   513→            rangeNote?: string;
+   514→            isManual: boolean;
+   515→          };
+   516→
+   517→          // Store the transcript (or chunks + topicIndex for long videos) as
+   518→          // the conversation's video context so subsequent chat messages get
+   519→          // it injected automatically.
+   520→          const ctx: VideoContext = {
+   521→            url: data.url,
+   522→            videoId: data.videoId,
+   523→            title: data.title,
+   524→            author: data.author,
+   525→            transcript: data.transcript ?? undefined,
+   526→            chunks: data.chunks ?? undefined,
+   527→            topicIndex: data.topicIndex ?? undefined,
+   528→            loadedAt: Date.now(),
+   529→          };
+   530→          setVideoContext(convoId, ctx);
+   531→
+   532→          // Welcome message with clear instructions
+   533→          const mins = Math.round(
+   534→            (data.endTime - data.startTime) / 60
+   535→          );
+   536→          const isLong = !!(data.chunks && data.chunks.length > 0);
+   537→          const transcriptDesc = isLong
+   538→            ? `${data.segmentCount} segments · ~${mins} min · split into ${data.chunks!.length} chunks for fast retrieval`
+   539→            : `${data.segmentCount} segments${mins > 0 ? ` · ~${mins} min` : ""}`;
+   540→          const welcomeContent =
+   541→            `✅ **Video loaded — ask me anything about it!**\n\n` +
+   542→            `**Title:** ${data.title}\n` +
+   543→            `**Channel:** ${data.author}\n` +
+   544→            `**URL:** ${data.url}\n` +
+   545→            `**Transcript:** ${transcriptDesc}${data.isManual ? " (manual paste)" : ""}\n` +
+   546→            (data.rangeNote ? `**Note:** ${data.rangeNote}\n` : "") +
+   547→            (isLong
+   548→              ? `**Long video mode:** I built a topic index in parallel and will retrieve the most relevant chunks for each question — so even a 50-hour video can be queried accurately and fast.\n`
+   549→              : "") +
+   550→            `\n---\n\n` +
+   551→            `I'll answer your questions **only** based on what's in this video's transcript. ` +
+   552→            `If you ask about something that isn't covered in the video, I'll let you know.\n\n` +
+   553→            `**Try asking:**\n` +
+   554→            `- "What is the main topic of this video?"\n` +
+   555→            `- "Summarize the key points"\n` +
+   556→            `- "What did they say about X?"\n` +
+   557→            `- "Explain the part at [MM:SS]"\n\n` +
+   558→            `Go ahead and type your question below 👇`;
+   559→          updateMessage(convoId, assistantMsg.id, welcomeContent);
+   560→        } catch (err: unknown) {
+   561→          const message =
+   562→            err instanceof Error ? err.message : "Something went wrong.";
+   563→          updateMessage(
+   564→            convoId,
+   565→            assistantMsg.id,
+   566→            `⚠️ **Error:** ${message}`
+   567→          );
+   568→        } finally {
+   569→          setStreaming(false);
+   570→        }
+   571→        return;
+   572→      }
+   573→
+   574→      // ---------- Summary / Interview modes (streaming) ----------
+   575→      let userMsgContent: string;
+   576→      if (isInterview) {
+   577→        const opts = payload.interviewOptions;
+   578→        const rolePart = opts?.targetRole ? ` for a ${opts.targetRole} role` : "";
+   579→        const countPart = opts ? `${opts.questionCount}` : "15";
+   580→        const typePart = opts?.interviewType ? ` ${opts.interviewType}` : "";
+   581→        const diffPart = opts?.difficulty ? ` at ${opts.difficulty} difficulty` : "";
+   582→        userMsgContent =
+   583→          `Generate ${countPart}${typePart} interview questions and answers${rolePart}${diffPart} from this YouTube video` +
+   584→          (startSec !== undefined || endSec !== undefined
+   585→            ? ` from ${payload.startTime || "0:00"} to ${
+   586→                payload.endTime || "end"
+   587→              }`
+   588→            : "") +
+   589→          (isManual ? " (using a transcript I pasted manually)" : "") +
+   590→          (payload.instructions ? `. Instructions: ${payload.instructions}` : ".");
+   591→      } else {
+   592→        userMsgContent =
+   593→          `Summarize this YouTube video` +
+   594→          (startSec !== undefined || endSec !== undefined
+   595→            ? ` from ${payload.startTime || "0:00"} to ${
+   596→                payload.endTime || "end"
+   597→              }`
+   598→            : "") +
+   599→          (isManual ? " (using a transcript I pasted manually)" : "") +
+   600→          (payload.instructions ? `. Instructions: ${payload.instructions}` : ".");
+   601→      }
+   602→
+   603→      const userMsg: ChatMessage = {
+   604→        id: genId(),
+   605→        role: "user",
+   606→        content: userMsgContent,
+   607→        createdAt: Date.now(),
+   608→        youtubeMeta: meta,
+   609→      };
+   610→
+   611→      const apiPayload: Record<string, unknown> = {
+   612→        url: payload.url,
+   613→        startTime: payload.startTime,
+   614→        endTime: payload.endTime,
+   615→        instructions: payload.instructions,
+   616→        transcript: payload.transcript,
+   617→      };
+   618→      if (isInterview && payload.interviewOptions) {
+   619→        apiPayload.difficulty = payload.interviewOptions.difficulty;
+   620→        apiPayload.questionCount = payload.interviewOptions.questionCount;
+   621→        apiPayload.interviewType = payload.interviewOptions.interviewType;
+   622→        apiPayload.targetRole = payload.interviewOptions.targetRole;
+   623→      }
+   624→
+   625→      const endpoint = isInterview
+   626→        ? "/api/youtube-interview"
+   627→        : "/api/youtube-summary";
+   628→
+   629→      const placeholder = isManual
+   630→        ? isInterview
+   631→          ? "⏳ Generating interview Q&A from your pasted transcript…"
+   632→          : "⏳ Summarizing your pasted transcript…"
+   633→        : isInterview
+   634→        ? "⏳ Fetching transcript and generating interview Q&A…"
+   635→        : "⏳ Fetching transcript and preparing summary…";
+   636→
+   637→      await runStream(userMsg, endpoint, apiPayload, placeholder, (botMessage) => {
+   638→        setYoutubeBotHint(botMessage);
+   639→        setYoutubeOpen(true);
+   640→      });
+   641→    },
+   642→    [activeId, appendMessage, createConversation, runStream, setStreaming, setVideoContext, updateMessage]
+   643→  );
+   644→
+   645→  const handleStop = () => {
+   646→    abortRef.current?.abort();
+   647→    abortRef.current = null;
+   648→    setStreaming(false);
+   649→  };
+   650→
+   651→  // Auth gate: show loading spinner while checking session, show login screen if not authed
+   652→  if (authLoading) {
+   653→    return (
+   654→      <div className="flex h-screen w-full items-center justify-center bg-white dark:bg-zinc-950">
+   655→        <Loader2 className="h-8 w-8 animate-spin text-zinc-400" />
+   656→      </div>
+   657→    );
+   658→  }
+   659→  if (!user) {
+   660→    return <LoginScreen />;
+   661→  }
+   662→
+   663→  return (
+   664→    <div className="flex h-screen w-full overflow-hidden bg-white dark:bg-zinc-950">
+   665→      {/* Desktop sidebar */}
+   666→      <div
+   667→        className={cn(
+   668→          "hidden md:flex flex-shrink-0 transition-all duration-200",
+   669→          sidebarOpen ? "w-72" : "w-0"
+   670→        )}
+   671→        style={{ overflow: "hidden" }}
+   672→      >
+   673→        <div className="w-72 h-full">
+   674→          <Sidebar onClose={() => setSidebarOpen(false)} />
+   675→        </div>
+   676→      </div>
+   677→
+   678→      {/* Mobile sidebar drawer */}
+   679→      {sidebarOpen && (
+   680→        <div
+   681→          className="fixed inset-0 z-40 md:hidden"
+   682→          onClick={() => setSidebarOpen(false)}
+   683→        >
+   684→          <div className="absolute inset-0 bg-black/40" />
+   685→          <div
+   686→            className="absolute left-0 top-0 h-full w-72 shadow-xl"
+   687→            onClick={(e) => e.stopPropagation()}
+   688→          >
+   689→            <Sidebar onClose={() => setSidebarOpen(false)} />
+   690→          </div>
+   691→        </div>
+   692→      )}
+   693→
+   694→      {/* Main area */}
+   695→      <div className="flex flex-1 flex-col min-w-0">
+   696→        <header className="flex h-14 flex-shrink-0 items-center gap-2 border-b border-zinc-200 dark:border-zinc-800 px-3 md:px-4">
+   697→          {!sidebarOpen && (
+   698→            <button
+   699→              onClick={() => setSidebarOpen(true)}
+   700→              className="p-2 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-900 transition-colors"
+   701→              aria-label="Open sidebar"
+   702→            >
+   703→              <PanelLeftOpen className="h-5 w-5 text-zinc-600 dark:text-zinc-300" />
+   704→            </button>
+   705→          )}
+   706→          <div className="flex items-center gap-2">
+   707→            <div className="flex h-6 w-6 items-center justify-center rounded-md bg-gradient-to-br from-emerald-400 to-emerald-600">
+   708→              <Sparkles className="h-3.5 w-3.5 text-white" />
+   709→            </div>
+   710→            <span className="text-sm font-semibold text-zinc-800 dark:text-zinc-100 tracking-tight">
+   711→              Summar<span className="text-emerald-500">AI</span>
+   712→            </span>
+   713→          </div>
+   714→        </header>
+   715→
+   716→        {/* Video-context banner — only shown when this conversation has a
+   717→            loaded video (i.e., the user picked "Ask about video" mode). */}
+   718→        {videoContext && (
+   719→          <div className="flex-shrink-0 border-b border-zinc-200 dark:border-zinc-800 bg-gradient-to-r from-red-50 to-amber-50 dark:from-red-950/30 dark:to-amber-950/30 px-4 py-2">
+   720→            <div className="mx-auto max-w-3xl flex items-center gap-2 text-xs">
+   721→              <Youtube className="h-3.5 w-3.5 text-red-600 dark:text-red-400 shrink-0" />
+   722→              <span className="text-zinc-700 dark:text-zinc-300 truncate">
+   723→                <span className="font-semibold">Ask-about-video mode:</span>{" "}
+   724→                <span className="text-zinc-600 dark:text-zinc-400">
+   725→                  {videoContext.title}
+   726→                </span>
+   727→              </span>
+   728→              <button
+   729→                type="button"
+   730→                onClick={() => {
+   731→                  if (activeId) setVideoContext(activeId, null);
+   732→                }}
+   733→                className="ml-auto shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-white/60 dark:hover:bg-zinc-800/60 transition-colors"
+   734→                title="Exit ask-about-video mode and return to normal chat"
+   735→              >
+   736→                ✕ Exit video mode
+   737→              </button>
+   738→            </div>
+   739→          </div>
+   740→        )}
+   741→
+   742→        <div ref={scrollRef} className="flex-1 overflow-y-auto chatgpt-scroll">
+   743→          {messages.length === 0 ? (
+   744→            <EmptyState onPickPrompt={(p) => sendMessage(p, [])} />
+   745→          ) : (
+   746→            <div className="pb-4">
+   747→              {messages.map((m, idx) => {
+   748→                // The latest "completed" assistant response is eligible for
+   749→                // the Regenerate button. We consider it regeneratable if:
+   750→                //   - it's an assistant message
+   751→                //   - we're not currently streaming
+   752→                //   - it's the last message, OR it's second-to-last and the
+   753→                //     last message is a user message (waiting for response)
+   754→                const isRegeneratable =
+   755→                  m.role === "assistant" &&
+   756→                  !isStreaming &&
+   757→                  (idx === messages.length - 1 ||
+   758→                    (idx === messages.length - 2 &&
+   759→                      messages[messages.length - 1].role === "user"));
+   760→                return (
+   761→                  <MessageBubble
+   762→                    key={m.id}
+   763→                    role={m.role}
+   764→                    content={m.content}
+   765→                    attachments={m.attachments}
+   766→                    youtubeMeta={m.youtubeMeta}
+   767→                    videoId={activeVideoId}
+   768→                    isStreaming={
+   769→                      isStreaming &&
+   770→                      idx === messages.length - 1 &&
+   771→                      m.role === "assistant"
+   772→                    }
+   773→                    isLatestAssistant={isRegeneratable}
+   774→                    onRegenerate={
+   775→                      isRegeneratable ? handleRegenerate : undefined
+   776→                    }
+   777→                  />
+   778→                );
+   779→              })}
+   780→            </div>
+   781→          )}
+   782→        </div>
+   783→
+   784→        <ChatInput
+   785→          onSubmit={sendMessage}
+   786→          onStop={handleStop}
+   787→          onOpenYouTube={(prefilledUrl) => {
+   788→            setYoutubeInitialUrl(prefilledUrl);
+   789→            setYoutubeOpen(true);
+   790→          }}
+   791→          isStreaming={isStreaming}
+   792→        />
+   793→      </div>
+   794→
+   795→      <YouTubeDialog
+   796→        open={youtubeOpen}
+   797→        onOpenChange={(open) => {
+   798→          setYoutubeOpen(open);
+   799→          if (!open) setYoutubeInitialUrl(undefined);
+   800→        }}
+   801→        onSubmit={handleYouTube}
+   802→        botBlockedHint={youtubeBotHint}
+   803→        onClearHint={() => setYoutubeBotHint(null)}
+   804→        initialUrl={youtubeInitialUrl}
+   805→      />
+   806→    </div>
+   807→  );
+   808→}
+   809→
+   810→function parseTimeToSec(s: string): number | undefined {
+   811→  const trimmed = s.trim();
+   812→  if (!trimmed) return undefined;
+   813→  const parts = trimmed.split(":").map((p) => parseInt(p, 10));
+   814→  if (parts.some((n) => isNaN(n))) return undefined;
+   815→  if (parts.length === 1) return parts[0];
+   816→  if (parts.length === 2) return parts[0] * 60 + parts[1];
+   817→  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+   818→  return undefined;
+   819→}
+   820→

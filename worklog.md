@@ -67,3 +67,39 @@ Stage Summary:
   4. No video context → normal chat works (regression check passed)
 - Video load completes in <1s; chat responses in 2-3s thanks to the strict prompt keeping answers concise
 - TypeScript: 0 errors. ESLint: 0 errors.
+
+---
+Task ID: youtube-502-fix
+Agent: main
+Task: Fix the 502 error during YouTube interview Q&A generation, and verify both pending tasks (conversational YouTube Q&A + auth-based routing) are working.
+
+Work Log:
+- Explored the auth setup, chat architecture, and YouTube flow via the Explore subagent
+- Discovered that Task A (conversational Q&A about YouTube) was already implemented via /api/youtube-load + /api/chat (buildVideoSystemPrompt + VIDEO_OFF_TOPIC_REPLY)
+- Discovered that Task B (auth-based routing) was already implemented via client-side auth gate in page.tsx (if !user return <LoginScreen />)
+- Identified the real issue: 502 error from the LLM gateway (Z.ai SDK) with no retry logic
+- Created /home/z/my-project/src/lib/llm.ts — shared LLM helper with withRetry() that retries on 502/503/504/520/521/522/524/network errors using exponential backoff (3 attempts, 1.2s base delay, 6s max)
+- Refactored /api/youtube-interview/route.ts to use chatComplete() + streamTextResponse() from the shared lib (removed duplicated streamTextResponse and ZAI import)
+- Refactored /api/youtube-summary/route.ts the same way
+- Refactored /api/chat/route.ts to use chatComplete() + visionComplete() with built-in retry
+- Added friendlier error messages for transient gateway errors so users see "The AI service is temporarily unavailable..." instead of "Request failed: 502"
+- TypeScript compiles clean (tsc --noEmit)
+- ESLint passes clean (eslint .)
+- Started dev server on port 3001 and ran end-to-end tests:
+  * YouTube interview with manual transcript → 200 OK, 4.5KB structured Q&A with cheat-sheet
+  * /api/chat with videoContext + in-scope question → 200 OK, answer with [1:58] timestamp reference
+  * /api/chat with videoContext + out-of-scope question (weather + coding contest) → 200 OK, exact "⚠️ This topic is not covered in this YouTube video..." reply
+  * /api/chat with videoContext + explicit "give me interview questions" request → 200 OK, generates 4 Q&A pairs from the transcript
+  * /api/auth/me without cookie → {"user":null} (triggers LoginScreen client-side)
+  * /api/auth/signup → creates user, sets cookie, returns user
+  * /api/auth/me with cookie → returns the logged-in user (triggers home screen client-side)
+  * /api/auth/logout → destroys session, cookie cleared
+- Cleaned up test user from DB
+- Stopped dev server
+
+Stage Summary:
+- The 502 error was a transient LLM gateway failure with no retry — now all 3 LLM-calling routes (/api/chat, /api/youtube-summary, /api/youtube-interview) use the shared chatComplete/visionComplete helpers which auto-retry on 502/503/504/network errors with exponential backoff.
+- Task A (conversational Q&A about YouTube) is fully working: in-scope questions get timestamped answers; out-of-scope questions (weather, coding contests, general knowledge, etc.) get the exact "⚠️ This topic is not covered in this YouTube video..." reply; explicit requests for interview questions get generated Q&A.
+- Task B (auth-based routing) is fully working: logged-out users see ONLY the LoginScreen (with login + signup tabs), logged-in users see the home/chat screen. The auth gate is in page.tsx lines 513-523.
+- Files created: /home/z/my-project/src/lib/llm.ts
+- Files modified: /home/z/my-project/src/app/api/youtube-interview/route.ts, /home/z/my-project/src/app/api/youtube-summary/route.ts, /home/z/my-project/src/app/api/chat/route.ts

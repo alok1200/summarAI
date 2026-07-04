@@ -1,5 +1,10 @@
 import { NextRequest } from "next/server";
-import ZAI from "z-ai-web-dev-sdk";
+import {
+  chatComplete,
+  visionComplete,
+  type ChatMessage as LlmChatMessage,
+  type VisionMessage,
+} from "@/lib/llm";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -119,14 +124,12 @@ export async function POST(req: NextRequest) {
     const hasImages =
       !!lastUserMessage?.attachments?.some((a) => a.kind === "image" && a.dataUrl);
 
-    const zai = await ZAI.create();
-
     let content: string;
 
     if (hasImages && lastUserMessage) {
       // Use the vision API for the latest user message with images.
       // Earlier user messages with images: convert to text-only descriptors.
-      const visionMessages: any[] = [];
+      const visionMessages: VisionMessage[] = [];
 
       visionMessages.push({ role: "system", content: systemPrompt });
 
@@ -134,7 +137,7 @@ export async function POST(req: NextRequest) {
         const m = cleaned[i];
         if (i === realLastUserIdx) {
           // Build multimodal content for this message
-          const parts: any[] = [];
+          const parts: Array<{ type: "text"; text: string } | { type: "image_url"; image_url: { url: string } }> = [];
           const textContent = buildMessageText({
             ...m,
             // For the last message, don't include the "[Image attached]" placeholder
@@ -167,32 +170,18 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      const completion = await zai.chat.completions.createVision({
-        model: "glm-4v-flash",
-        messages: visionMessages,
-        thinking: { type: "disabled" },
-      } as any);
-      content =
-        completion?.choices?.[0]?.message?.content ??
-        "Sorry, I couldn't analyze the attached image(s).";
+      content = await visionComplete(visionMessages);
     } else {
       // Plain text chat — include text-file content inline.
-      const fullMessages: { role: "system" | "user" | "assistant"; content: string }[] =
-        [
-          { role: "system", content: systemPrompt },
-          ...cleaned.map((m) => ({
-            role: m.role,
-            content: buildMessageText(m),
-          })),
-        ];
+      const fullMessages: LlmChatMessage[] = [
+        { role: "system", content: systemPrompt },
+        ...cleaned.map((m) => ({
+          role: m.role,
+          content: buildMessageText(m),
+        })),
+      ];
 
-      const completion = await zai.chat.completions.create({
-        messages: fullMessages,
-        thinking: { type: "disabled" },
-      });
-      content =
-        completion?.choices?.[0]?.message?.content ??
-        "Sorry, I couldn't generate a response.";
+      content = await chatComplete(fullMessages);
     }
 
     // Stream the response back token-by-token for a typing effect.

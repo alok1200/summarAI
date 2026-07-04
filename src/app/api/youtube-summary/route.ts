@@ -1,5 +1,4 @@
 import { NextRequest } from "next/server";
-import ZAI from "z-ai-web-dev-sdk";
 import {
   type TranscriptSegment,
   type VideoMeta,
@@ -10,42 +9,10 @@ import {
   fetchTranscriptWithRetry,
   parseUserTranscript,
 } from "@/lib/youtube-transcript";
+import { chatComplete, streamTextResponse } from "@/lib/llm";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-/**
- * Stream a plain-text response to the client, splitting it into small chunks
- * so the UI can render it like a chat-streaming reply.
- */
-async function streamTextResponse(
-  header: string,
-  content: string
-): Promise<Response> {
-  const encoder = new TextEncoder();
-  const stream = new ReadableStream({
-    async start(controller) {
-      for (const tok of header.match(/\s+|\S+/g) ?? [header]) {
-        controller.enqueue(encoder.encode(tok));
-        await new Promise((r) => setTimeout(r, 4));
-      }
-      const tokens = content.match(/\s+|\S+/g) ?? [content];
-      for (const token of tokens) {
-        controller.enqueue(encoder.encode(token));
-        await new Promise((r) => setTimeout(r, 12));
-      }
-      controller.close();
-    },
-  });
-
-  return new Response(stream, {
-    headers: {
-      "Content-Type": "text/plain; charset=utf-8",
-      "Cache-Control": "no-cache, no-transform",
-      Connection: "keep-alive",
-    },
-  });
-}
 
 function jsonResponse(status: number, body: unknown) {
   return new Response(JSON.stringify(body), {
@@ -182,18 +149,16 @@ export async function POST(req: NextRequest) {
       `Transcript (with timestamps):\n\n${truncated}\n\n` +
       `Please provide your structured summary now.`;
 
-    const zai = await ZAI.create();
-    const completion = await zai.chat.completions.create({
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userMessage },
-      ],
-      thinking: { type: "disabled" },
-    });
+    const content: string = await chatComplete([
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userMessage },
+    ]);
 
-    const content: string =
-      completion?.choices?.[0]?.message?.content ??
-      "Sorry, I couldn't generate a summary for this video.";
+    if (!content || content.trim().length === 0) {
+      throw new Error(
+        "The AI service returned an empty response. This usually means the gateway is overloaded — please try again in a moment."
+      );
+    }
 
     const sourceLabel = isManual ? " (manual paste)" : "";
     const header =
@@ -209,7 +174,7 @@ export async function POST(req: NextRequest) {
       (instructions ? `**Your instructions:** ${instructions}\n` : "") +
       `\n---\n\n`;
 
-    return await streamTextResponse(header, content);
+    return streamTextResponse(header, content);
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Unknown error";
     const code = (err as any)?.code;
@@ -239,8 +204,13 @@ export async function POST(req: NextRequest) {
         videoMeta: metaPayload,
       });
     }
+    const friendlyMsg = /502|503|504|bad gateway|service unavailable|gateway timeout|upstream/i.test(
+      message
+    )
+      ? "The AI service is temporarily unavailable (gateway error). Please try again in a few seconds — your request will be retried automatically on the next attempt."
+      : message || "YouTube summary failed.";
     return jsonResponse(500, {
-      error: message || "YouTube summary failed.",
+      error: friendlyMsg,
       videoMeta: metaPayload,
     });
   }

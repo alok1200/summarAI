@@ -19,6 +19,8 @@ import { requireAuth } from "@/lib/require-auth";
 import { rateLimit, aiRateLimitConfig } from "@/lib/rate-limit";
 import { readJsonBody, sanitizeError } from "@/lib/api-helpers";
 import { logger } from "@/lib/logger";
+import { db } from "@/lib/db";
+import { embedBatch, embeddingToBuffer } from "@/lib/embeddings";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -45,6 +47,171 @@ function jsonResponse(status: number, body: unknown) {
     status,
     headers: { "Content-Type": "application/json" },
   });
+}
+
+/**
+ * Persist (or look up) a transcript + its chunks for the current user.
+ *
+ * - If a Transcript for (userId, videoId) already exists, return its id
+ *   WITHOUT re-embedding — embeddings are idempotent and expensive.
+ * - Otherwise create the Transcript row + one TranscriptChunk row per chunk,
+ *   then kick off embedding in the background (non-blocking — we return
+ *   the response immediately so the user doesn't wait ~30s for embeddings).
+ *
+ * For short videos (single transcript string), we still persist one chunk
+ * with the whole text — this lets future "search across my videos" work
+ * uniformly.
+ *
+ * Returns the transcriptId. Callers can ignore it (the chat endpoint will
+ * look up the transcript by userId+videoId at request time).
+ */
+async function persistTranscript(
+  userId: string,
+  videoId: string,
+  title: string,
+  author: string | undefined,
+  chunks: { index: number; text: string }[],
+  transcriptText?: string
+): Promise<string> {
+  // Check for existing transcript — if it exists, return its id without
+  // re-persisting or re-embedding.
+  const existing = await db.transcript.findUnique({
+    where: { userId_videoId: { userId, videoId } },
+    select: { id: true, embedded: true },
+  });
+  if (existing) {
+    logger.info("youtube-load.transcript_cached", {
+      userId,
+      videoId,
+      transcriptId: existing.id,
+      alreadyEmbedded: existing.embedded,
+    });
+
+    // If the existing transcript isn't embedded yet, kick off embedding
+    // in the background — it might have been created by an earlier version
+    // of this code, or embedding failed last time.
+    if (!existing.embedded) {
+      void embedTranscriptInBackground(existing.id);
+    }
+
+    return existing.id;
+  }
+
+  // Create new Transcript + chunks in a single transaction.
+  // Use the single transcript text as chunk[0] for short videos, or the
+  // explicit chunks for long videos.
+  const finalChunks =
+    chunks.length > 0
+      ? chunks
+      : transcriptText
+      ? [{ index: 0, text: transcriptText }]
+      : [];
+
+  const lengthChars = finalChunks.reduce((sum, c) => sum + c.text.length, 0);
+
+  const transcript = await db.transcript.create({
+    data: {
+      userId,
+      videoId,
+      title,
+      author,
+      lengthChars,
+      chunkCount: finalChunks.length,
+      embedded: false,
+      chunks: {
+        create: finalChunks.map((c) => ({
+          chunkIndex: c.index,
+          text: c.text,
+          embedding: null, // set by background embedding
+        })),
+      },
+    },
+  });
+
+  logger.info("youtube-load.transcript_persisted", {
+    userId,
+    videoId,
+    transcriptId: transcript.id,
+    chunkCount: finalChunks.length,
+    lengthChars,
+  });
+
+  // Kick off embedding in the background. Don't await — the user gets
+  // their response immediately; embeddings will be ready by the time
+  // they ask their first question (or by their next session).
+  void embedTranscriptInBackground(transcript.id);
+
+  return transcript.id;
+}
+
+/**
+ * Background-embed all chunks of a transcript.
+ *
+ * This function is fire-and-forget — it's called with `void` from
+ * persistTranscript() so the request doesn't block on embedding.
+ *
+ * Flow:
+ *   1. Load all chunks for the transcript (without embeddings, since they're null)
+ *   2. Call embedBatch() — handles batching + parallelism internally
+ *   3. Update each chunk's embedding column
+ *   4. Set transcript.embedded = true
+ *
+ * Errors are logged but not thrown — the user's request already succeeded.
+ * If embedding fails, the chat endpoint will fall back to LLM-as-retriever.
+ */
+async function embedTranscriptInBackground(transcriptId: string): Promise<void> {
+  try {
+    const chunks = await db.transcriptChunk.findMany({
+      where: { transcriptId, embedding: null },
+      orderBy: { chunkIndex: "asc" },
+      select: { id: true, text: true },
+    });
+
+    if (chunks.length === 0) {
+      // All chunks already embedded — just mark the transcript as embedded.
+      await db.transcript.update({
+        where: { id: transcriptId },
+        data: { embedded: true },
+      });
+      return;
+    }
+
+    logger.info("embeddings.background.start", {
+      transcriptId,
+      chunkCount: chunks.length,
+    });
+
+    const embeddings = await embedBatch(chunks.map((c) => c.text));
+
+    // Update each chunk in parallel (small N, safe to do in-memory)
+    await Promise.all(
+      embeddings.map((emb, i) => {
+        if (!emb) return Promise.resolve();
+        return db.transcriptChunk.update({
+          where: { id: chunks[i].id },
+          data: { embedding: embeddingToBuffer(emb) },
+        });
+      })
+    );
+
+    await db.transcript.update({
+      where: { id: transcriptId },
+      data: { embedded: true },
+    });
+
+    const successCount = embeddings.filter((e) => e !== null).length;
+    logger.info("embeddings.background.complete", {
+      transcriptId,
+      success: successCount,
+      failed: chunks.length - successCount,
+    });
+  } catch (err) {
+    logger.error("embeddings.background.error", {
+      transcriptId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    // Don't rethrow — this is fire-and-forget.
+  }
 }
 
 /**
@@ -239,6 +406,28 @@ export async function POST(req: NextRequest) {
         .map((s) => `[${formatTime(s.start)}] ${s.text}`)
         .join("\n");
 
+      // Persist transcript + kick off background embedding (non-blocking).
+      // For short videos we store the whole transcript as a single chunk —
+      // enables future "search across my videos" features.
+      try {
+        await persistTranscript(
+          user.id,
+          videoId,
+          videoTitle,
+          videoAuthor,
+          [], // no chunks — pass as single text
+          transcriptText
+        );
+      } catch (err) {
+        // Persistence failure should NOT break the user's request — log
+        // and continue. Vector search just won't be available.
+        logger.error("youtube-load.persist_failed", {
+          userId: user.id,
+          videoId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+
       return jsonResponse(200, {
         ok: true,
         videoId,
@@ -265,6 +454,23 @@ export async function POST(req: NextRequest) {
     );
     const chunks = chunkTranscript(filtered);
     const topicIndex = await buildTopicIndex(chunks, videoTitle);
+
+    // Persist transcript + chunks, kick off background embedding.
+    try {
+      await persistTranscript(
+        user.id,
+        videoId,
+        videoTitle,
+        videoAuthor,
+        chunks.map((c) => ({ index: c.index, text: c.text }))
+      );
+    } catch (err) {
+      logger.error("youtube-load.persist_failed", {
+        userId: user.id,
+        videoId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
 
     // Return chunks as an array of { startTime, endTime, startTimeLabel, endTimeLabel, text }
     const chunksPayload = chunks.map((c) => ({

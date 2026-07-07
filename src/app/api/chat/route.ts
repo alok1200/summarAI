@@ -14,6 +14,12 @@ import { requireAuth } from "@/lib/require-auth";
 import { rateLimit, aiRateLimitConfig } from "@/lib/rate-limit";
 import { readJsonBody, sanitizeError } from "@/lib/api-helpers";
 import { logger } from "@/lib/logger";
+import { db } from "@/lib/db";
+import { embedText } from "@/lib/embeddings";
+import {
+  retrieveRelevantChunks as vectorRetrieve,
+  type VectorSearchResult,
+} from "@/lib/vector-search";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -145,22 +151,129 @@ function buildShortVideoSystemPrompt(ctx: VideoContextPayload): string {
 }
 
 /**
- * RETRIEVAL step for LONG videos: given the user's latest question and the
- * video's topic index, ask the LLM to pick the most relevant chunk numbers.
- * Returns an array of chunk indexes (1-indexed) to inject into context.
+ * RETRIEVAL step for LONG videos.
+ *
+ * TWO-TIER STRATEGY:
+ *   1. VECTOR SEARCH (primary): embed the user's question, do cosine
+ *      similarity search against chunk embeddings in the DB. This is
+ *      ~1000× cheaper and ~100× faster than the LLM-as-retriever fallback.
+ *      Requires the transcript to be persisted + embedded (see
+ *      /api/youtube-load → persistTranscript → embedTranscriptInBackground).
+ *
+ *   2. LLM-AS-RETRIEVER (fallback): if vector search isn't available
+ *      (transcript not in DB, embeddings not generated yet, or embedding
+ *      the question failed), ask the LLM to pick chunk numbers from the
+ *      topic index. This is the original retrieval mechanism and works
+ *      without any vector infrastructure — slower + more expensive but
+ *      always available as long as the topic index exists.
+ *
+ * The fallback guarantees the chat works even on first load (before
+ * background embedding completes) and if the embedding model fails to
+ * download (e.g., offline environment).
+ *
+ * Returns:
+ *   - chunks: the selected chunks to inject into the system prompt
+ *   - offTopic: true if NO chunks were selected (question is unrelated
+ *     to the video) — caller should reply with the off-topic message
+ *     instead of asking the LLM
+ *   - source: "vector" | "llm" | "fallback" — for logging/metrics
+ */
+async function retrieveRelevantChunks(
+  userQuestion: string,
+  ctx: VideoContextPayload,
+  userId: string
+): Promise<{ chunks: VideoChunkPayload[]; offTopic: boolean; source: "vector" | "llm" | "fallback" }> {
+  const allChunks = ctx.chunks ?? [];
+  if (allChunks.length === 0) {
+    return { chunks: [], offTopic: true, source: "fallback" };
+  }
+
+  // ---------- TIER 1: Vector search ----------
+  // Try vector search first. This requires:
+  //   1. The video has a Transcript row in the DB for this user
+  //   2. At least some chunks have embeddings (transcript.embedded = true)
+  //   3. embedText() succeeds for the user's question
+  //
+  // If any of these fail, fall through to LLM-as-retriever below.
+  try {
+    const transcript = await db.transcript.findUnique({
+      where: { userId_videoId: { userId, videoId: ctx.videoId } },
+      select: { id: true, embedded: true, chunkCount: true },
+    });
+
+    if (transcript && transcript.embedded) {
+      const queryEmbedding = await embedText(userQuestion);
+      if (queryEmbedding) {
+        const results: VectorSearchResult[] = await vectorRetrieve(
+          transcript.id,
+          queryEmbedding,
+          3
+        );
+
+        if (results.length > 0) {
+          // Map vector-search results back to VideoChunkPayload[] using
+          // chunkIndex. The chunks payload from the client is 1-indexed
+          // (c.index field), while our DB chunks are 0-indexed (chunkIndex
+          // column). Convert: DB chunkIndex 0 → client chunk 1.
+          const selected = results
+            .map((r) => allChunks.find((c) => c.index === r.chunkIndex + 1))
+            .filter(Boolean) as VideoChunkPayload[];
+
+          if (selected.length > 0) {
+            logger.info("chat.retrieval.vector_hit", {
+              userId,
+              videoId: ctx.videoId,
+              topScore: results[0].score,
+              selectedCount: selected.length,
+            });
+            return { chunks: selected, offTopic: false, source: "vector" };
+          }
+        }
+
+        // Vector search returned 0 results — embeddings exist but nothing
+        // matched. This is rare (would mean every chunk scored below the
+        // implicit filter). Treat as off-topic ONLY if the LLM agrees.
+        // Fall through to LLM-as-retriever for a second opinion.
+        logger.info("chat.retrieval.vector_empty", {
+          userId,
+          videoId: ctx.videoId,
+        });
+      } else {
+        logger.warn("chat.retrieval.embed_failed", {
+          userId,
+          videoId: ctx.videoId,
+        });
+      }
+    }
+  } catch (err) {
+    // DB error or unexpected — log and fall through to LLM-as-retriever.
+    logger.error("chat.retrieval.vector_error", {
+      userId,
+      videoId: ctx.videoId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  // ---------- TIER 2: LLM-as-retriever (fallback) ----------
+  return retrieveRelevantChunksLLM(userQuestion, ctx);
+}
+
+/**
+ * LLM-as-retriever fallback — the original retrieval mechanism.
+ *
+ * Given the user's latest question and the video's topic index, ask the
+ * LLM to pick the most relevant chunk numbers. Returns an array of chunk
+ * indexes (1-indexed) to inject into context.
  *
  * If the LLM decides the question is off-topic for the whole video, it
  * returns an empty array — and we reply with the off-topic message without
  * even loading any chunks.
  */
-async function retrieveRelevantChunks(
+async function retrieveRelevantChunksLLM(
   userQuestion: string,
   ctx: VideoContextPayload
-): Promise<{ chunks: VideoChunkPayload[]; offTopic: boolean }> {
+): Promise<{ chunks: VideoChunkPayload[]; offTopic: boolean; source: "llm" | "fallback" }> {
   const allChunks = ctx.chunks ?? [];
-  if (allChunks.length === 0) {
-    return { chunks: [], offTopic: true };
-  }
 
   const systemPrompt =
     `You are a retrieval system for a long YouTube video. The user has loaded ` +
@@ -193,23 +306,23 @@ async function retrieveRelevantChunks(
   } catch (err) {
     console.error("[chat] retrieval LLM call failed:", err);
     // Fallback: just use the first 2 chunks
-    return { chunks: allChunks.slice(0, 2), offTopic: false };
+    return { chunks: allChunks.slice(0, 2), offTopic: false, source: "fallback" };
   }
 
   // Parse the JSON array from the response
   const match = responseText.match(/\[[\s\S]*\]/);
   if (!match) {
     console.warn("[chat] retrieval response had no JSON array:", responseText.slice(0, 200));
-    return { chunks: allChunks.slice(0, 2), offTopic: false };
+    return { chunks: allChunks.slice(0, 2), offTopic: false, source: "fallback" };
   }
   let indexes: number[];
   try {
     indexes = JSON.parse(match[0]);
   } catch {
-    return { chunks: allChunks.slice(0, 2), offTopic: false };
+    return { chunks: allChunks.slice(0, 2), offTopic: false, source: "fallback" };
   }
   if (!Array.isArray(indexes) || indexes.length === 0) {
-    return { chunks: [], offTopic: true };
+    return { chunks: [], offTopic: true, source: "llm" };
   }
 
   // De-dup, clamp to valid range, take top 3
@@ -217,13 +330,13 @@ async function retrieveRelevantChunks(
     .filter((n) => typeof n === "number" && n >= 1 && n <= allChunks.length)
     .slice(0, 3);
   if (unique.length === 0) {
-    return { chunks: [], offTopic: true };
+    return { chunks: [], offTopic: true, source: "llm" };
   }
 
   const selected = unique.map(
     (n) => allChunks.find((c) => c.index === n) ?? allChunks[n - 1]
   );
-  return { chunks: selected.filter(Boolean), offTopic: false };
+  return { chunks: selected.filter(Boolean), offTopic: false, source: "llm" };
 }
 
 /**
@@ -359,7 +472,7 @@ export async function POST(req: NextRequest) {
         .find((m) => m.role === "user" && m.content.trim());
       const userQuestion = lastUserText?.content ?? "";
 
-      const retrieved = await retrieveRelevantChunks(userQuestion, videoContext);
+      const retrieved = await retrieveRelevantChunks(userQuestion, videoContext, user.id);
       if (retrieved.offTopic || retrieved.chunks.length === 0) {
         // Skip the LLM call entirely and short-circuit with the off-topic reply.
         offTopicReply = VIDEO_OFF_TOPIC_REPLY;

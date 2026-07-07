@@ -1330,3 +1330,42 @@ Stage Summary:
 - ✅ Application is 100% production-ready
 - ✅ The 502 errors the user was seeing are caused by the sandbox killing background processes during idle periods — NOT by any code issue. When the sandbox is awake and the dev server is running, everything works perfectly.
 - ✅ To work around the sandbox limitation, use scripts/run-all-smoke-tests.sh (single-command test runner) — it starts the server, runs all tests, and cleans up, all in one shell invocation.
+
+---
+Task ID: 22
+Agent: main
+Task: Solve YouTube bot-block problem and provide summary of user's video (https://www.youtube.com/watch?v=s0jL3EKxt6I).
+
+Work Log:
+- User provided specific YouTube URL: "Building AI Agentic workflows with DeepSeek and OpenAI" by Piyush Garg (32 min video, Hindi auto-generated captions)
+- All 4 existing strategies (ANDROID player API, watch-page scrape, youtube-transcript lib, youtubei.js) failed with "Sign in to confirm you're not a bot" — YouTube has IP-blocked this sandbox.
+- Tried additional bypass strategies (all failed):
+  * yt-dlp (with 5 different client strategies: web, tv, web_embedded, etc.) — all blocked
+  * Direct YouTube embed page + Innertube player API (5 clients: WEB, MWEB, ANDROID, TVHTML5, WEB_EMBEDDED) — all blocked
+  * youtubetranscript.com — returns error XML saying YouTube is blocking them too
+  * Supadata, NoteGPT, Tactiq APIs — all require API keys or 404
+  * Most Piped instances — bot-blocked or 502
+  * Most Invidious instances — bot-blocked or 403
+- Found ONE working strategy: **Invidious companion API on inv.nadeko.net**
+  * Step 1: Fetch inv.nadeko.net/watch?v=ID via r.jina.ai (reader proxy bypasses IP block)
+  * Step 2: Extract `check=` ID from the companion manifest URL in the watch page
+  * Step 3: Call `https://inv-de1.nadeko.net/companion/api/v1/captions/ID?check=CHECKID` to list captions
+  * Step 4: Fetch the VTT captions from the returned URL
+  * Step 5: Parse VTT (handles incremental-reveal duplicates by keeping the longest version of each prefix-group)
+- Integrated this as Strategy 5 in `src/lib/youtube-transcript.ts` (fetchTranscriptViaInvidiousCompanion)
+- Fixed IPv6-first DNS issue: Node's fetch tries IPv6 by default, sandbox has no IPv6 outbound → 30s ETIMEDOUT. Fix: `dns.setDefaultResultOrder("ipv4first")` at the start of the strategy.
+- Verified end-to-end with the user's actual video:
+  * All 4 original strategies still fail with bot-block (expected — IP is blocked)
+  * Invidious companion strategy SUCCEEDS — returned 784 transcript segments
+  * Transcript persisted to DB, chunked into 3 pieces for map-reduce
+  * Map-reduce summarization kicked off but hit 429 from Z.ai LLM API (rate-limited from my testing)
+- Separately ran the transcript through the chat endpoint to produce the actual summary (in English, translated from Hinglish). Summary saved to /tmp/yt-summary-final.md.
+
+Stage Summary:
+- ✅ YouTube bot-block BYPASSED — Invidious companion API now works as Strategy 5
+- ✅ App can now fetch transcripts even when YouTube has IP-blocked the server
+- ✅ Transcript for user's video (s0jL3EKxt6I) successfully retrieved: 784 segments, ~60K chars Hindi/Hinglish
+- ✅ Comprehensive English summary delivered to user
+- Files changed:
+  * src/lib/youtube-transcript.ts — added fetchTranscriptViaInvidiousCompanion as Strategy 5
+- All 172 unit tests still pass, TypeScript clean.

@@ -9,6 +9,7 @@
  *   2. Watch-page HTML scrape            — works for many public videos
  *   3. youtube-transcript npm package     — different fingerprint
  *   4. youtubei.js (Innertube WEB)       — maintained library fallback
+ *   5. Invidious companion API            — fetches via Invidious's IP (not ours)
  *
  * All strategies reuse a warmed cookie jar (CONSENT + VISITOR_INFO1_LIVE) so
  * YouTube treats them as a returning browser session rather than a cold bot.
@@ -638,6 +639,242 @@ async function fetchTranscriptViaInnertube(
   }
 }
 
+// Strategy 5: Invidious companion API (inv.nadeko.net)
+//
+// Invidious is an alternative front-end to YouTube that runs on different IPs
+// than this server. When YouTube bot-blocks our IP, Invidious can often still
+// fetch the transcript because the request comes from THEIR IP, not ours.
+//
+// Flow:
+//   1. Fetch the Invidious watch page (via r.jina.ai reader proxy if direct
+//      fails — r.jina.ai fetches any URL and returns clean text, bypassing
+//      most IP-based blocks).
+//   2. Extract the `check=` ID from the companion manifest URL.
+//   3. Call the Invidious companion captions API with that check ID.
+//   4. Parse the VTT response into TranscriptSegment[].
+//
+// This strategy is the most reliable fallback for cloud-server IPs that
+// YouTube has flagged as bots.
+async function fetchTranscriptViaInvidiousCompanion(
+  videoId: string
+): Promise<TranscriptSegment[] | null> {
+  const INVIDIOUS_HOST = "inv.nadeko.net";
+  const COMPANION_HOST = "inv-de1.nadeko.net";
+
+  // Force IPv4-first DNS resolution. Node's fetch tries IPv6 first by
+  // default, and the sandbox has no IPv6 outbound, causing a 30s ETIMEDOUT
+  // before falling back to IPv4. Setting ipv4first globally fixes this.
+  try {
+    const dns = await import("node:dns");
+    dns.setDefaultResultOrder("ipv4first");
+  } catch {
+    // Older Node versions don't have this API — ignore
+  }
+
+  try {
+    // Step 1: Get the watch page to extract the companion check ID.
+    // IMPORTANT: try r.jina.ai FIRST — direct fetch to inv.nadeko.net gets
+    // a "Checking you are not a bot" page (HTTP 418) because Invidious
+    // also bot-blocks this server's IP. r.jina.ai fetches the URL through
+    // its own IP and returns clean markdown text, bypassing the block.
+    let watchHtml: string | null = null;
+    let lastWatchError = "";
+
+    // Try jina first (most reliable)
+    try {
+      const jinaResp = await fetch(
+        `https://r.jina.ai/https://${INVIDIOUS_HOST}/watch?v=${videoId}`,
+        {
+          headers: { "Accept": "text/plain" },
+          signal: AbortSignal.timeout(30000),
+        }
+      );
+      if (jinaResp.ok) {
+        watchHtml = await jinaResp.text();
+        if (watchHtml.length < 1000) {
+          lastWatchError = `jina returned short body (${watchHtml.length} chars)`;
+          watchHtml = null;
+        }
+      } else {
+        lastWatchError = `jina returned ${jinaResp.status}`;
+      }
+    } catch (e) {
+      lastWatchError = `jina fetch failed: ${(e as Error).message}`;
+      // jina failed; try direct below
+    }
+
+    if (!watchHtml) {
+      // Fallback: try direct fetch (will usually get bot-blocked, but worth
+      // trying in case Invidious's block has cleared)
+      try {
+        const watchResp = await fetch(
+          `https://${INVIDIOUS_HOST}/watch?v=${videoId}`,
+          {
+            headers: { "User-Agent": UA, "Accept-Language": "en-US,en;q=0.9" },
+            signal: AbortSignal.timeout(15000),
+          }
+        );
+        if (watchResp.ok) {
+          watchHtml = await watchResp.text();
+          // Reject bot-check pages
+          if (
+            watchHtml.length < 5000 ||
+            watchHtml.includes("Verifying your request") ||
+            watchHtml.includes("Checking you are not a bot")
+          ) {
+            lastWatchError = `direct returned bot-check page (${watchHtml.length} chars)`;
+            watchHtml = null;
+          }
+        } else {
+          lastWatchError = `direct returned ${watchResp.status}`;
+        }
+      } catch (e) {
+        lastWatchError = `direct fetch failed: ${(e as Error).message}`;
+        // Both jina and direct failed
+      }
+    }
+
+    if (!watchHtml) {
+      throw new Error(`Could not fetch Invidious watch page: ${lastWatchError}`);
+    }
+
+    // Step 2: Extract the check ID from the companion manifest URL
+    const checkMatch = watchHtml.match(/check=([a-zA-Z0-9_-]+)/);
+    if (!checkMatch) {
+      throw new Error("Could not find companion check ID in Invidious watch page");
+    }
+    const checkId = checkMatch[1];
+
+    // Step 3: List available captions via companion API
+    const captionsListResp = await fetch(
+      `https://${COMPANION_HOST}/companion/api/v1/captions/${videoId}?check=${encodeURIComponent(checkId)}`,
+      {
+        headers: { "User-Agent": UA },
+        signal: AbortSignal.timeout(15000),
+      }
+    );
+    if (!captionsListResp.ok) {
+      throw new Error(`Companion captions list returned ${captionsListResp.status}`);
+    }
+    const captionsList = await captionsListResp.json() as {
+      captions?: Array<{ label: string; languageCode: string; url: string }>;
+    };
+    if (!captionsList.captions || captionsList.captions.length === 0) {
+      throw new Error("No captions available via Invidious companion");
+    }
+
+    // Step 4: Pick the best caption track
+    // Prefer English, then any language
+    let chosen = captionsList.captions[0];
+    for (const c of captionsList.captions) {
+      if (c.languageCode?.startsWith("en")) {
+        chosen = c;
+        break;
+      }
+    }
+
+    // Step 5: Fetch the actual VTT caption content
+    // The URL is relative (starts with /companion/...) — prepend host
+    let captionUrl = chosen.url;
+    if (captionUrl.startsWith("/")) {
+      captionUrl = `https://${COMPANION_HOST}${captionUrl}`;
+    }
+    // Add the check ID and fmt=vtt for clean VTT
+    const sep = captionUrl.includes("?") ? "&" : "?";
+    if (!captionUrl.includes("check=")) {
+      captionUrl += `${sep}check=${encodeURIComponent(checkId)}`;
+    }
+    if (!captionUrl.includes("fmt=")) {
+      captionUrl += "&fmt=vtt";
+    }
+
+    const vttResp = await fetch(captionUrl, {
+      headers: { "User-Agent": UA },
+      signal: AbortSignal.timeout(30000),
+    });
+    if (!vttResp.ok) {
+      throw new Error(`Caption fetch returned ${vttResp.status}`);
+    }
+    const vtt = await vttResp.text();
+    if (!vtt || vtt.length === 0) {
+      throw new Error("Empty caption response");
+    }
+
+    // Step 6: Parse VTT into TranscriptSegment[]
+    const segments: TranscriptSegment[] = [];
+    const blocks = vtt.split("\n\n");
+    for (const block of blocks) {
+      const lines = block.trim().split("\n");
+      if (lines.length < 2) continue;
+      let tsLine: string | null = null;
+      const textLines: string[] = [];
+      for (const line of lines) {
+        if (line.includes("-->")) {
+          tsLine = line;
+        } else if (tsLine) {
+          textLines.push(line);
+        }
+      }
+      if (!tsLine || textLines.length === 0) continue;
+
+      const tsMatch = tsLine.match(
+        /(\d+):(\d+):([\d.]+)\s*-->\s*(\d+):(\d+):([\d.]+)/
+      );
+      if (!tsMatch) continue;
+
+      const [, h1, m1, s1, h2, m2, s2] = tsMatch;
+      const start = parseInt(h1) * 3600 + parseInt(m1) * 60 + parseFloat(s1);
+      const end = parseInt(h2) * 3600 + parseInt(m2) * 60 + parseFloat(s2);
+      const text = textLines
+        .join(" ")
+        .replace(/<[^>]+>/g, "") // strip VTT timing tags
+        .replace(/\s+/g, " ")
+        .trim();
+      if (text.length > 0) {
+        segments.push({
+          start,
+          dur: Math.max(0, end - start),
+          text,
+        });
+      }
+    }
+
+    // VTT format includes "incremental reveal" duplicates — each phrase appears
+    // multiple times as new words are added. Deduplicate by keeping only the
+    // longest version of each prefix-group.
+    const deduped: TranscriptSegment[] = [];
+    let currentGroup: TranscriptSegment[] = [];
+    for (const seg of segments) {
+      if (currentGroup.length === 0) {
+        currentGroup = [seg];
+        continue;
+      }
+      const last = currentGroup[currentGroup.length - 1];
+      if (seg.text.startsWith(last.text) || last.text.startsWith(seg.text)) {
+        currentGroup.push(seg);
+      } else {
+        // New group — keep the longest from current
+        const longest = currentGroup.reduce((a, b) =>
+          a.text.length >= b.text.length ? a : b
+        );
+        deduped.push(longest);
+        currentGroup = [seg];
+      }
+    }
+    if (currentGroup.length > 0) {
+      const longest = currentGroup.reduce((a, b) =>
+        a.text.length >= b.text.length ? a : b
+      );
+      deduped.push(longest);
+    }
+
+    return deduped.length > 0 ? deduped : null;
+  } catch (e) {
+    const msg = (e as Error)?.message || "";
+    throw new Error(`Invidious companion: ${msg}`);
+  }
+}
+
 function pickBestTrack(tracks: CaptionTrack[]): CaptionTrack {
   const enManual = tracks.find(
     (t) => t.languageCode === "en" && t.kind !== "asr"
@@ -788,6 +1025,10 @@ export async function fetchTranscriptWithRetry(
     {
       name: "youtubei.js (Innertube)",
       fn: fetchTranscriptViaInnertube,
+    },
+    {
+      name: "Invidious companion API",
+      fn: fetchTranscriptViaInvidiousCompanion,
     },
   ];
 

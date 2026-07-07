@@ -350,18 +350,18 @@ export default function Home() {
           {!sidebarOpen && (
             <button
               onClick={() => setSidebarOpen(true)}
-              className="p-2 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-900 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/40"
+              className="p-2 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-900 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/40"
               aria-label="Open sidebar"
             >
               <PanelLeftOpen className="h-5 w-5 text-zinc-600 dark:text-zinc-300" />
             </button>
           )}
           <div className="flex items-center gap-2">
-            <div className="flex h-6 w-6 items-center justify-center rounded-md bg-gradient-to-br from-emerald-400 to-emerald-600 shadow-sm">
+            <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-500 via-violet-500 to-purple-600 shadow-sm shadow-indigo-500/30 ring-1 ring-white/20">
               <Sparkles className="h-3.5 w-3.5 text-white" />
             </div>
             <span className="text-sm font-semibold text-zinc-800 dark:text-zinc-100 tracking-tight">
-              Summar<span className="text-emerald-500">AI</span>
+              Summar<span className="text-indigo-500">AI</span>
             </span>
           </div>
         </header>
@@ -383,7 +383,7 @@ export default function Home() {
                 onClick={() => {
                   if (activeId) setVideoContext(activeId, null);
                 }}
-                className="ml-auto shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-white/60 dark:hover:bg-zinc-800/60 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/40"
+                className="ml-auto shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-white/60 dark:hover:bg-zinc-800/60 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/40"
                 title="Exit ask-about-video mode and return to normal chat"
               >
                 ✕ Exit video mode

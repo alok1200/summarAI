@@ -170,7 +170,7 @@ export function Sidebar({ onClose }: SidebarProps) {
       <div className="px-3 pb-2">
         <button
           onClick={handleNew}
-          className="flex w-full items-center gap-3 rounded-lg border border-zinc-200 dark:border-zinc-800 px-3 py-2.5 text-sm font-medium text-zinc-800 dark:text-zinc-200 hover:bg-white dark:hover:bg-zinc-900 hover:border-zinc-300 dark:hover:border-zinc-700 hover:shadow-sm transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/40"
+          className="flex w-full items-center gap-3 rounded-lg border border-zinc-200 dark:border-zinc-800 px-3 py-2.5 text-sm font-medium text-zinc-800 dark:text-zinc-200 hover:bg-white dark:hover:bg-zinc-900 hover:border-zinc-300 dark:hover:border-zinc-700 hover:shadow-sm transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/40"
         >
           <Plus className="h-4 w-4" />
           New chat
@@ -293,7 +293,7 @@ export function Sidebar({ onClose }: SidebarProps) {
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-zinc-100 dark:hover:bg-zinc-900 transition-colors">
-              <div className="flex h-7 w-7 items-center justify-center rounded-full bg-gradient-to-br from-emerald-400 to-emerald-600 text-xs font-bold text-white flex-shrink-0">
+              <div className="flex h-7 w-7 items-center justify-center rounded-full bg-gradient-to-br from-indigo-500 to-violet-600 text-xs font-bold text-white flex-shrink-0 ring-1 ring-white/20">
                 {initials}
               </div>
               <div className="flex-1 min-w-0">

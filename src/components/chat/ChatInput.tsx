@@ -175,47 +175,44 @@ export function ChatInput({
 
         {/* Detected YouTube URL — one-click summarize, no second page / no modal. */}
         {detectedYoutubeUrl && (
-          <div className="mb-2 flex items-center gap-2 rounded-lg border border-red-200 dark:border-red-800 bg-red-50/70 dark:bg-red-950/30 px-3 py-1.5">
-            <Youtube className="h-3.5 w-3.5 text-red-600 dark:text-red-400 flex-shrink-0" />
+          <div className="mb-2 flex items-center gap-3 rounded-xl border border-red-200 dark:border-red-900/60 bg-gradient-to-r from-red-50 to-rose-50 dark:from-red-950/40 dark:to-rose-950/30 px-3 py-2 shadow-sm">
+            <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-red-600 text-white shadow-sm">
+              <Youtube className="h-3.5 w-3.5" />
+            </div>
             <span className="flex-1 truncate text-xs text-zinc-700 dark:text-zinc-300">
-              YouTube link detected — click to fetch transcript &amp; summarize
-              automatically.
+              <span className="font-semibold text-red-700 dark:text-red-400">YouTube link detected</span>
+              <span className="text-zinc-500 dark:text-zinc-400"> — click to fetch transcript &amp; summarize automatically.</span>
             </span>
             <button
               type="button"
               onClick={() => {
-                // Send JUST the URL as a message. page.tsx detects YouTube
-                // URLs in sendMessage and routes them to /api/youtube-summary
-                // directly — no panel, no second page, no settings to pick.
                 onSubmit(detectedYoutubeUrl, []);
                 setValue("");
               }}
               disabled={isStreaming}
-              className="flex-shrink-0 rounded-md bg-red-600 hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed px-2.5 py-0.5 text-[11px] font-semibold text-white transition-colors"
+              className="flex-shrink-0 rounded-lg bg-red-600 hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed px-3 py-1.5 text-[11px] font-semibold text-white shadow-sm transition-all active:scale-95"
             >
-              Summarize video →
+              Summarize →
             </button>
             <button
               type="button"
               onClick={() => {
-                // Strip the YouTube URL from the input so the chip disappears.
-                // The user can keep typing their question as a normal chat message.
                 setValue((v) => v.replace(detectedYoutubeUrl, "").trim());
               }}
-              className="flex-shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-white/60 dark:hover:bg-zinc-800/60 transition-colors"
+              className="flex-shrink-0 rounded-md px-1.5 py-1 text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-white/60 dark:hover:bg-zinc-800/60 transition-colors"
               title="Dismiss — send as a normal message"
             >
-              ✕
+              <X className="h-3.5 w-3.5" />
             </button>
           </div>
         )}
 
         <div
           className={cn(
-            "relative flex items-end gap-1 rounded-3xl border bg-white dark:bg-zinc-800 shadow-sm transition-all",
-            "border-zinc-200 dark:border-zinc-700",
-            "focus-within:border-emerald-400 dark:focus-within:border-emerald-500",
-            "focus-within:shadow-md focus-within:ring-2 focus-within:ring-emerald-500/10"
+            "relative flex items-end gap-1 rounded-2xl border bg-white dark:bg-zinc-800/80 backdrop-blur-sm transition-all",
+            "border-zinc-200 dark:border-zinc-700/70 shadow-sm",
+            "focus-within:border-indigo-400 dark:focus-within:border-indigo-500",
+            "focus-within:shadow-md focus-within:ring-2 focus-within:ring-indigo-500/10"
           )}
         >
           {/* Hidden file input */}
@@ -232,7 +229,7 @@ export function ChatInput({
           <button
             onClick={() => fileInputRef.current?.click()}
             disabled={pending.length >= MAX_FILES}
-            className="ml-2 mb-2.5 flex h-9 w-9 items-center justify-center rounded-full text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200 disabled:opacity-40 disabled:cursor-not-allowed transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/40"
+            className="ml-2 mb-2.5 flex h-9 w-9 items-center justify-center rounded-full text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-700/70 hover:text-zinc-700 dark:hover:text-zinc-200 disabled:opacity-40 disabled:cursor-not-allowed transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/40"
             aria-label="Attach files"
             title="Attach files"
           >
@@ -253,7 +250,7 @@ export function ChatInput({
             {isStreaming ? (
               <button
                 onClick={onStop}
-                className="flex h-9 w-9 items-center justify-center rounded-full bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 hover:opacity-80 active:scale-95 transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/40"
+                className="flex h-9 w-9 items-center justify-center rounded-full bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 hover:opacity-80 active:scale-95 transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/40 shadow-sm"
                 aria-label="Stop"
               >
                 <Square className="h-4 w-4 fill-current" />
@@ -263,10 +260,10 @@ export function ChatInput({
                 onClick={handleSubmit}
                 disabled={!hasInput}
                 className={cn(
-                  "flex h-9 w-9 items-center justify-center rounded-full transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/40",
+                  "flex h-9 w-9 items-center justify-center rounded-full transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/40 shadow-sm",
                   hasInput
-                    ? "bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 hover:opacity-80 active:scale-95"
-                    : "bg-zinc-200 dark:bg-zinc-700 text-zinc-400 dark:text-zinc-500 cursor-not-allowed"
+                    ? "bg-gradient-to-br from-indigo-500 to-violet-600 text-white hover:opacity-90 active:scale-95"
+                    : "bg-zinc-200 dark:bg-zinc-700/70 text-zinc-400 dark:text-zinc-500 cursor-not-allowed shadow-none"
                 )}
                 aria-label="Send"
               >
@@ -275,14 +272,15 @@ export function ChatInput({
             )}
           </div>
         </div>
-        <p className="mt-2 flex items-center justify-center gap-3 text-center text-xs text-zinc-400 dark:text-zinc-500">
+        <p className="mt-2 flex items-center justify-center gap-3 text-center text-[11px] text-zinc-400 dark:text-zinc-500">
           <span className="inline-flex items-center gap-1">
             <ImageIcon className="h-3 w-3" /> Images &amp; text files
           </span>
+          <span className="text-zinc-300 dark:text-zinc-700">·</span>
           <span className="inline-flex items-center gap-1">
-            <Youtube className="h-3 w-3" /> YouTube summaries &amp; interview Q&amp;A
+            <Youtube className="h-3 w-3" /> YouTube summaries &amp; Q&amp;A
           </span>
-          <span className="hidden sm:inline">·</span>
+          <span className="text-zinc-300 dark:text-zinc-700 hidden sm:inline">·</span>
           <span className="hidden sm:inline">AI can make mistakes.</span>
         </p>
       </div>

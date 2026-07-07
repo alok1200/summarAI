@@ -15,7 +15,8 @@ import {
   ChevronRight,
   RefreshCw,
   ExternalLink,
-  Download,
+  Clock,
+  Sparkles,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { Attachment, YouTubeMeta } from "@/store/chat";
@@ -39,27 +40,13 @@ interface MessageBubbleProps {
 /* Helpers                                                             */
 /* ------------------------------------------------------------------ */
 
-/**
- * Convert [MM:SS] or [H:MM:SS] timestamps in a string to markdown links that
- * open the YouTube video at that timestamp. The timestamp text is preserved
- * (so [3:45] becomes [3:45](https://youtu.be/VIDEO?t=225s)) — users see the
- * same label but it's now clickable.
- *
- * If no videoId is provided, returns the input unchanged.
- */
 function linkifyTimestamps(text: string, videoId?: string): string {
   if (!videoId) return text;
-  // Match [MM:SS] or [H:MM:SS] or [HH:MM:SS], but not already-linkified ones.
-  // Avoid matching inside markdown link syntax: [...](...) — but for simplicity
-  // we just check that the bracket is not immediately followed by "(".
   const tsRegex = /\[(\d{1,2}:\d{2}(?::\d{2})?)\](?!\()/g;
   return text.replace(tsRegex, (full, ts: string) => {
     const seconds = tsToSeconds(ts);
     if (seconds === null) return full;
-    // Use youtu.be short link with t=Ns parameter (cleaner than watch?v=…&t=Ns)
     const url = `https://youtu.be/${videoId}?t=${seconds}`;
-    // Escape the timestamp text inside the link label so it doesn't get
-    // re-parsed as markdown.
     return `[${full}](${url})`;
   });
 }
@@ -72,30 +59,19 @@ function tsToSeconds(ts: string): number | null {
   return null;
 }
 
-/**
- * Detect "✅ Chunk X/Y summarized" / "✅ Chunk X/Y analyzed" lines in the
- * streaming content, and return a parsed progress object for the visual bar.
- *
- * Returns null when no map-reduce progress pattern is detected.
- */
 interface ProgressInfo {
-  /** Total chunks to process. */
   total: number;
-  /** Chunks completed so far. */
   done: number;
-  /** Phase: "map" (per-chunk summaries being generated) | "reduce" (merging). */
   phase: "map" | "reduce";
 }
 
 function parseProgress(content: string): ProgressInfo | null {
-  // Detect the "⏳ Processing N chunks in parallel" header to get the total.
   const headerMatch = content.match(
     /⏳\s*\*\*Processing\s+(\d+)\s+chunks in parallel\*\*/
   );
   if (!headerMatch) return null;
   const total = parseInt(headerMatch[1], 10);
 
-  // Find the latest "✅ Chunk X/Y" line — there may be several accumulated.
   const chunkLines = content.matchAll(/✅\s*Chunk\s+(\d+)\/(\d+)/g);
   let done = 0;
   for (const m of chunkLines) {
@@ -103,9 +79,7 @@ function parseProgress(content: string): ProgressInfo | null {
     if (d > done) done = d;
   }
 
-  // Reduce phase: "🔄 Merging…" or "🎯 Generating…"
-  const reduceMatch =
-    /(?:🔄\s*\*\*Merging|🎯\s*\*\*Generating)/.test(content);
+  const reduceMatch = /(?:🔄\s*\*\*Merging|🎯\s*\*\*Generating)/.test(content);
   if (reduceMatch) {
     return { total, done: total, phase: "reduce" };
   }
@@ -128,17 +102,17 @@ function StreamingProgressBar({ info }: { info: ProgressInfo }) {
       ? `Merging ${info.total} chunk summaries into final answer…`
       : `Processing chunk ${info.done} of ${info.total}…`;
   return (
-    <div className="my-3 rounded-lg border border-emerald-200 dark:border-emerald-800 bg-emerald-50/50 dark:bg-emerald-950/30 p-3">
-      <div className="flex items-center justify-between text-[11px] font-medium text-emerald-700 dark:text-emerald-300 mb-1.5">
+    <div className="my-3 rounded-xl border border-sky-200/60 dark:border-sky-900/60 bg-gradient-to-br from-sky-50 to-indigo-50 dark:from-sky-950/40 dark:to-indigo-950/40 p-3">
+      <div className="flex items-center justify-between text-[11px] font-semibold text-sky-700 dark:text-sky-300 mb-2">
         <span className="flex items-center gap-1.5">
-          <span className="inline-block h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
+          <span className="inline-block h-1.5 w-1.5 rounded-full bg-sky-500 animate-pulse" />
           {label}
         </span>
-        <span>{pct}%</span>
+        <span className="tabular-nums">{pct}%</span>
       </div>
-      <div className="h-1.5 w-full overflow-hidden rounded-full bg-emerald-100 dark:bg-emerald-900">
+      <div className="h-1.5 w-full overflow-hidden rounded-full bg-sky-100 dark:bg-sky-900/60">
         <div
-          className="h-full rounded-full bg-gradient-to-r from-emerald-400 to-emerald-600 transition-all duration-300 ease-out"
+          className="h-full rounded-full bg-gradient-to-r from-sky-400 to-indigo-500 transition-all duration-300 ease-out"
           style={{ width: `${pct}%` }}
         />
       </div>
@@ -146,22 +120,6 @@ function StreamingProgressBar({ info }: { info: ProgressInfo }) {
   );
 }
 
-/**
- * "Thinking…" indicator shown while we're waiting for the FIRST chunk of an
- * assistant response. Once real content arrives, this disappears.
- *
- * This addresses the UX gap where short-video summaries and normal chat
- * responses had no progress indicator — the user just saw a blank bubble
- * with a tiny blinking cursor for 5-30 seconds while the LLM warmed up.
- *
- * Shows:
- *   - An animated 3-dot "typing" indicator
- *   - An elapsed-time counter ("3s", "12s", …) so the user knows it's
- *     actually working, not stuck
- *
- * The map-reduce path has its own StreamingProgressBar above; this is only
- * shown when there's NO progress info (i.e. short videos + regular chat).
- */
 function StreamingWaitIndicator() {
   const [elapsed, setElapsed] = useState(0);
   useEffect(() => {
@@ -194,16 +152,16 @@ function CodeBlock({ language, value }: { language: string; value: string }) {
     setTimeout(() => setCopied(false), 1500);
   };
   return (
-    <div className="relative my-3 overflow-hidden rounded-lg border border-zinc-700">
-      <div className="flex items-center justify-between bg-zinc-800 px-4 py-1.5 text-xs text-zinc-300">
-        <span>{language || "code"}</span>
+    <div className="relative my-3 overflow-hidden rounded-xl border border-zinc-200 dark:border-zinc-800 shadow-sm">
+      <div className="flex items-center justify-between bg-zinc-50 dark:bg-zinc-900/80 px-4 py-1.5 text-xs text-zinc-600 dark:text-zinc-400 border-b border-zinc-200 dark:border-zinc-800">
+        <span className="font-mono">{language || "code"}</span>
         <button
           onClick={handleCopy}
-          className="flex items-center gap-1 hover:text-white"
+          className="flex items-center gap-1 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors"
         >
           {copied ? (
             <>
-              <Check className="h-3 w-3" /> Copied
+              <Check className="h-3 w-3 text-emerald-500" /> Copied
             </>
           ) : (
             <>
@@ -243,40 +201,65 @@ function formatTimeRange(meta: YouTubeMeta): string {
   return `${fmt(meta.startTime)} → ${fmt(meta.endTime)}`;
 }
 
+/**
+ * Cleaner YouTube card with higher-quality thumbnail, branded chip,
+ * and a "Play" overlay instead of just a YouTube logo.
+ */
 function YouTubeCard({ meta }: { meta: YouTubeMeta }) {
-  const thumb = `https://img.youtube.com/vi/${meta.videoId}/hqdefault.jpg`;
+  // Use mqdefault (320×180) — sharper than hqdefault for small cards
+  // and reliable on most browsers.
+  const thumb = `https://img.youtube.com/vi/${meta.videoId}/mqdefault.jpg`;
   return (
     <a
       href={meta.url}
       target="_blank"
       rel="noopener noreferrer"
-      className="group mt-2 flex gap-3 overflow-hidden rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 p-3 hover:border-zinc-300 dark:hover:border-zinc-600 transition-colors"
+      className={cn(
+        "group mt-2.5 flex gap-3 overflow-hidden rounded-xl",
+        "border border-zinc-200/80 dark:border-zinc-700/70",
+        "bg-white dark:bg-zinc-900/80 backdrop-blur-sm",
+        "p-2.5 pr-3",
+        "hover:border-red-300 dark:hover:border-red-700",
+        "hover:shadow-md transition-all"
+      )}
     >
-      <div className="relative h-16 w-28 flex-shrink-0 overflow-hidden rounded-lg bg-zinc-100 dark:bg-zinc-800">
+      <div className="relative h-[60px] w-[107px] flex-shrink-0 overflow-hidden rounded-lg bg-zinc-100 dark:bg-zinc-800">
         <img
           src={thumb}
           alt="YouTube thumbnail"
+          loading="lazy"
           className="h-full w-full object-cover"
           onError={(e) => {
             (e.currentTarget as HTMLImageElement).style.display = "none";
           }}
         />
-        <div className="absolute inset-0 flex items-center justify-center bg-black/30">
-          <Youtube className="h-6 w-6 text-red-600" />
+        {/* Soft dark gradient + play icon overlay */}
+        <div className="absolute inset-0 bg-gradient-to-t from-black/50 via-black/0 to-black/0" />
+        <div className="absolute inset-0 flex items-center justify-center">
+          <div className="flex h-7 w-7 items-center justify-center rounded-full bg-red-600 shadow-lg ring-2 ring-white/30 group-hover:scale-110 transition-transform">
+            <Youtube className="h-3.5 w-3.5 text-white" />
+          </div>
         </div>
       </div>
       <div className="flex min-w-0 flex-1 flex-col justify-center">
-        <p className="text-xs font-semibold text-zinc-700 dark:text-zinc-200">
-          YouTube video summary
+        <div className="flex items-center gap-1.5">
+          <span className="inline-flex items-center gap-1 rounded-md bg-red-50 dark:bg-red-950/50 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-red-600 dark:text-red-400">
+            <Youtube className="h-2.5 w-2.5" />
+            YouTube
+          </span>
+          <span className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
+            Summary
+          </span>
+        </div>
+        <p className="mt-1 truncate text-xs text-zinc-500 dark:text-zinc-400 font-mono">
+          youtu.be/{meta.videoId}
         </p>
-        <p className="mt-0.5 truncate text-[11px] text-zinc-500 dark:text-zinc-400 font-mono">
-          {meta.url}
-        </p>
-        <p className="mt-0.5 text-[11px] text-emerald-600 dark:text-emerald-400">
-          ⏱ {formatTimeRange(meta)}
+        <p className="mt-0.5 flex items-center gap-1 text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
+          <Clock className="h-3 w-3" />
+          {formatTimeRange(meta)}
         </p>
         {meta.instructions && (
-          <p className="mt-0.5 line-clamp-1 text-[11px] text-zinc-400 italic">
+          <p className="mt-0.5 line-clamp-1 text-[11px] text-zinc-400 dark:text-zinc-500 italic">
             “{meta.instructions}”
           </p>
         )}
@@ -288,8 +271,7 @@ function YouTubeCard({ meta }: { meta: YouTubeMeta }) {
 function AttachmentList({ attachments }: { attachments: Attachment[] }) {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   return (
-    <div className="mt-2 space-y-2">
-      {/* Image grid */}
+    <div className="mt-2.5 space-y-2">
       {attachments.filter((a) => a.kind === "image").length > 0 && (
         <div className="flex flex-wrap gap-2">
           {attachments
@@ -297,7 +279,7 @@ function AttachmentList({ attachments }: { attachments: Attachment[] }) {
             .map((a) => (
               <div
                 key={a.id}
-                className="relative overflow-hidden rounded-lg border border-zinc-200 dark:border-zinc-700"
+                className="relative overflow-hidden rounded-lg border border-white/20 dark:border-zinc-700"
               >
                 <img
                   src={a.dataUrl}
@@ -311,17 +293,16 @@ function AttachmentList({ attachments }: { attachments: Attachment[] }) {
             ))}
         </div>
       )}
-      {/* Text-file chips */}
       {attachments.filter((a) => a.kind === "text").map((a) => {
         const expanded = expandedId === a.id;
         return (
           <div
             key={a.id}
-            className="overflow-hidden rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-900"
+            className="overflow-hidden rounded-lg border border-white/20 dark:border-zinc-700 bg-zinc-50/90 dark:bg-zinc-900/80"
           >
             <button
               onClick={() => setExpandedId(expanded ? null : a.id)}
-              className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
+              className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-zinc-100/80 dark:hover:bg-zinc-800/80 transition-colors"
             >
               <FileText className="h-4 w-4 flex-shrink-0 text-zinc-500" />
               <span className="flex-1 truncate text-xs font-medium text-zinc-700 dark:text-zinc-200">
@@ -344,11 +325,10 @@ function AttachmentList({ attachments }: { attachments: Attachment[] }) {
           </div>
         );
       })}
-      {/* Other files (unsupported on the wire but shown for record) */}
       {attachments.filter((a) => a.kind === "file").map((a) => (
         <div
           key={a.id}
-          className="flex items-center gap-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-900 px-3 py-2"
+          className="flex items-center gap-2 rounded-lg border border-white/20 dark:border-zinc-700 bg-zinc-50/90 dark:bg-zinc-900/80 px-3 py-2"
         >
           <ImageIcon className="h-4 w-4 flex-shrink-0 text-zinc-500" />
           <span className="flex-1 truncate text-xs text-zinc-600 dark:text-zinc-300">
@@ -385,30 +365,33 @@ function AssistantActionBar({
   const [copied, setCopied] = useState(false);
 
   const handleCopy = () => {
-    // Copy the raw markdown content (without the streaming progress lines).
     navigator.clipboard.writeText(content);
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   };
 
-  // Don't render the bar while the very first chunk is still streaming in —
-  // it would just be a row of buttons with nothing useful to act on yet.
   if (isStreaming && !content.trim()) return null;
 
   return (
-    <div className="mt-2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+    <div className="mt-2.5 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
       <button
         onClick={handleCopy}
-        className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-700 transition-colors"
+        className={cn(
+          "flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[11px] font-medium",
+          "text-zinc-500 dark:text-zinc-400",
+          "hover:bg-zinc-100 dark:hover:bg-zinc-800",
+          "hover:text-zinc-900 dark:hover:text-zinc-100",
+          "transition-colors"
+        )}
         title="Copy response"
       >
         {copied ? (
           <>
-            <Check className="h-3 w-3" /> Copied
+            <Check className="h-3.5 w-3.5 text-emerald-500" /> Copied
           </>
         ) : (
           <>
-            <Copy className="h-3 w-3" /> Copy
+            <Copy className="h-3.5 w-3.5" /> Copy
           </>
         )}
       </button>
@@ -416,10 +399,16 @@ function AssistantActionBar({
       {isLatest && !isStreaming && onRegenerate && (
         <button
           onClick={onRegenerate}
-          className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-700 transition-colors"
+          className={cn(
+            "flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[11px] font-medium",
+            "text-zinc-500 dark:text-zinc-400",
+            "hover:bg-zinc-100 dark:hover:bg-zinc-800",
+            "hover:text-zinc-900 dark:hover:text-zinc-100",
+            "transition-colors"
+          )}
           title="Regenerate response"
         >
-          <RefreshCw className="h-3 w-3" /> Regenerate
+          <RefreshCw className="h-3.5 w-3.5" /> Regenerate
         </button>
       )}
 
@@ -428,10 +417,16 @@ function AssistantActionBar({
           href={`https://www.youtube.com/watch?v=${videoId}`}
           target="_blank"
           rel="noopener noreferrer"
-          className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-zinc-500 hover:text-red-600 dark:hover:text-red-400 hover:bg-zinc-100 dark:hover:bg-zinc-700 transition-colors"
+          className={cn(
+            "flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[11px] font-medium",
+            "text-zinc-500 dark:text-zinc-400",
+            "hover:bg-red-50 dark:hover:bg-red-950/40",
+            "hover:text-red-600 dark:hover:text-red-400",
+            "transition-colors"
+          )}
           title="Open video on YouTube"
         >
-          <Youtube className="h-3 w-3" /> Open video
+          <ExternalLink className="h-3.5 w-3.5" /> Open video
         </a>
       )}
     </div>
@@ -454,14 +449,11 @@ function MessageBubbleImpl({
 }: MessageBubbleProps) {
   const isUser = role === "user";
 
-  // Linkify [MM:SS] timestamps in the assistant content (only when there's a
-  // video context for the link to point at).
   const processedContent = useMemo(() => {
     if (isUser) return content;
     return linkifyTimestamps(content, videoId);
   }, [content, isUser, videoId]);
 
-  // Parse the streaming content for the long-video progress bar.
   const progressInfo = useMemo(
     () => (isStreaming && !isUser ? parseProgress(content) : null),
     [content, isStreaming, isUser]
@@ -470,57 +462,49 @@ function MessageBubbleImpl({
   return (
     <div
       className={cn(
-        "group relative w-full px-4 py-3 md:px-8",
-        // Both sides transparent at the row level — the bubble itself carries
-        // the background. This avoids the "full-width band" look that made
-        // the left/right split invisible before.
+        "group relative w-full px-4 py-3 md:px-6",
         "bg-transparent",
-        // Subtle entrance animation. Picks left vs. right based on the role
-        // so user messages slide in from the left and AI responses from the
-        // right. Disabled automatically via prefers-reduced-motion.
         isUser ? "msg-enter-user" : "msg-enter-assistant"
       )}
     >
       <div
         className={cn(
           "mx-auto flex max-w-3xl gap-3 items-start",
-          // User: avatar+bubble packed to the LEFT.
-          // AI:   bubble+avatar packed to the RIGHT (row reversed).
           isUser ? "justify-start" : "justify-end flex-row-reverse"
         )}
       >
-        {/* Avatar */}
+        {/* Avatar — refined with subtle ring and cleaner styling */}
         <div
           className={cn(
-            "flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-xs font-bold text-white shadow-sm",
+            "flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full",
+            "shadow-sm ring-1 ring-black/5 dark:ring-white/10",
             isUser
-              ? "bg-gradient-to-br from-emerald-400 to-emerald-600"
-              : "bg-gradient-to-br from-zinc-700 to-zinc-900 dark:from-zinc-200 dark:to-zinc-400 dark:text-zinc-900"
+              ? "bg-gradient-to-br from-indigo-500 to-violet-600 text-white"
+              : "bg-gradient-to-br from-zinc-100 to-zinc-300 dark:from-zinc-700 dark:to-zinc-800 text-zinc-700 dark:text-zinc-200"
           )}
         >
-          {isUser ? <User className="h-4 w-4" /> : "AI"}
+          {isUser ? (
+            <User className="h-4 w-4" />
+          ) : (
+            <Sparkles className="h-4 w-4" />
+          )}
         </div>
 
         {/* Bubble */}
         <div
           className={cn(
-            "flex min-w-0 flex-col",
-            // Cap BOTH user and AI bubbles at 75% of the row so the
-            // left/right split is visually obvious. Previously the AI bubble
-            // used `w-full sm:flex-1` which made it span the entire row and
-            // hid the right-alignment.
-            "max-w-[75%]",
+            "flex min-w-0 flex-col max-w-[80%]",
             isUser
-              ? "items-start rounded-2xl rounded-tl-sm bg-emerald-600 dark:bg-emerald-700 px-4 py-2.5 text-white"
-              : "items-end rounded-2xl rounded-tr-sm bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 px-4 py-3 w-full"
+              ? "items-start rounded-2xl rounded-tl-md"
+              : "items-end rounded-2xl rounded-tr-md w-full"
           )}
         >
           {/* Name label */}
           <div
             className={cn(
-              "mb-1 text-xs font-semibold",
+              "mb-1 text-xs font-semibold tracking-wide",
               isUser
-                ? "text-emerald-50"
+                ? "text-indigo-100"
                 : "text-zinc-500 dark:text-zinc-400"
             )}
           >
@@ -537,19 +521,34 @@ function MessageBubbleImpl({
 
           {/* Main content */}
           {isUser ? (
-            <div className="whitespace-pre-wrap break-words text-[15px] leading-7 text-white">
+            <div
+              className={cn(
+                "whitespace-pre-wrap break-words text-[14.5px] leading-7",
+                "rounded-2xl rounded-tl-md px-4 py-2.5",
+                "bg-gradient-to-br from-indigo-500 to-violet-600",
+                "text-white shadow-sm",
+                youtubeMeta || (attachments && attachments.length > 0)
+                  ? "mt-2"
+                  : ""
+              )}
+            >
               {content}
             </div>
           ) : (
-            <div className="prose prose-sm dark:prose-invert max-w-none w-full text-[15px] leading-7 text-zinc-800 dark:text-zinc-100 [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
-              {/* Visual progress bar at the top of a streaming map-reduce response */}
+            <div
+              className={cn(
+                "prose prose-sm dark:prose-invert max-w-none w-full",
+                "rounded-2xl rounded-tr-md px-4 py-3",
+                "bg-white dark:bg-zinc-800/80 backdrop-blur-sm",
+                "border border-zinc-200/70 dark:border-zinc-700/60",
+                "shadow-sm",
+                "text-[14.5px] leading-7",
+                "text-zinc-800 dark:text-zinc-100",
+                "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
+              )}
+            >
               {progressInfo && <StreamingProgressBar info={progressInfo} />}
 
-              {/* "Thinking…" indicator shown ONLY while we're streaming AND
-                  no real content has arrived yet AND there's no map-reduce
-                  progress bar (which has its own visual). Once the first
-                  chunk lands this disappears, replaced by the markdown
-                  content + blinking cursor below. */}
               {isStreaming &&
                 !progressInfo &&
                 !processedContent.trim() && <StreamingWaitIndicator />}
@@ -563,7 +562,7 @@ function MessageBubbleImpl({
                     if (inline) {
                       return (
                         <code
-                          className="rounded bg-zinc-200 dark:bg-zinc-800 px-1.5 py-0.5 text-[0.85em] font-mono"
+                          className="rounded bg-zinc-200/70 dark:bg-zinc-700/70 px-1.5 py-0.5 text-[0.85em] font-mono text-zinc-800 dark:text-zinc-100"
                           {...props}
                         >
                           {children}
@@ -580,15 +579,13 @@ function MessageBubbleImpl({
                   pre({ children }) {
                     return <>{children}</>;
                   },
-                  // Open all links in a new tab so the user doesn't lose their place
-                  // in the conversation (especially important for timestamp links).
                   a({ href, children, ...props }) {
                     return (
                       <a
                         href={href}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="text-emerald-600 dark:text-emerald-400 underline underline-offset-2 hover:text-emerald-700 dark:hover:text-emerald-300"
+                        className="text-indigo-600 dark:text-indigo-400 underline underline-offset-2 hover:text-indigo-700 dark:hover:text-indigo-300 transition-colors"
                         {...props}
                       >
                         {children}
@@ -600,7 +597,7 @@ function MessageBubbleImpl({
                 {processedContent || (isStreaming ? "…" : "")}
               </ReactMarkdown>
               {isStreaming && (
-                <span className="ml-0.5 inline-block h-4 w-2 animate-pulse bg-zinc-600 dark:bg-zinc-300 align-middle" />
+                <span className="ml-0.5 inline-block h-4 w-2 animate-pulse bg-indigo-500 dark:bg-indigo-400 align-middle rounded-sm" />
               )}
             </div>
           )}

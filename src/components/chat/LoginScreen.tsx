@@ -220,15 +220,15 @@ function LoginScreenInner() {
   };
 
   return (
-    <div className="flex min-h-screen w-full items-center justify-center bg-zinc-50 dark:bg-zinc-950 px-4 py-8">
+    <div className="flex min-h-screen w-full items-center justify-center bg-gradient-to-br from-zinc-50 via-indigo-50/30 to-violet-50/30 dark:from-zinc-950 dark:via-indigo-950/20 dark:to-violet-950/20 px-4 py-8">
       <div className="w-full max-w-md">
         {/* Logo / brand header */}
         <div className="mb-8 text-center">
-          <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-emerald-400 to-emerald-600 text-white shadow-lg">
-            <Sparkles className="h-7 w-7" />
+          <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-500 via-violet-500 to-purple-600 text-white shadow-lg shadow-indigo-500/30 ring-1 ring-white/20">
+            <Sparkles className="h-8 w-8" />
           </div>
           <div className="mb-1 text-2xl font-semibold tracking-tight text-zinc-800 dark:text-zinc-100">
-            Summar<span className="text-emerald-500">AI</span>
+            Summar<span className="text-indigo-500">AI</span>
           </div>
           <h1 className="text-lg font-semibold text-zinc-700 dark:text-zinc-200">
             {mode === "login" ? "Welcome back" : "Create your account"}
@@ -241,14 +241,14 @@ function LoginScreenInner() {
         </div>
 
         {/* Card */}
-        <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-6 shadow-sm transition-shadow hover:shadow-md">
+        <div className="rounded-2xl border border-zinc-200/70 dark:border-zinc-800 bg-white/90 dark:bg-zinc-900/70 backdrop-blur-md p-6 shadow-xl shadow-zinc-900/5 dark:shadow-black/20 transition-shadow hover:shadow-2xl">
           {/* Mode tabs */}
-          <div className="mb-5 flex rounded-lg bg-zinc-100 dark:bg-zinc-800 p-1">
+          <div className="mb-5 flex rounded-xl bg-zinc-100/80 dark:bg-zinc-800/80 p-1">
             <button
               type="button"
               onClick={() => switchMode("login")}
               className={cn(
-                "flex-1 rounded-md py-1.5 text-sm font-medium transition-colors",
+                "flex-1 rounded-lg py-2 text-sm font-medium transition-all",
                 mode === "login"
                   ? "bg-white dark:bg-zinc-950 text-zinc-900 dark:text-white shadow-sm"
                   : "text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-300"
@@ -260,7 +260,7 @@ function LoginScreenInner() {
               type="button"
               onClick={() => switchMode("signup")}
               className={cn(
-                "flex-1 rounded-md py-1.5 text-sm font-medium transition-colors",
+                "flex-1 rounded-lg py-2 text-sm font-medium transition-all",
                 mode === "signup"
                   ? "bg-white dark:bg-zinc-950 text-zinc-900 dark:text-white shadow-sm"
                   : "text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-300"
@@ -276,7 +276,7 @@ function LoginScreenInner() {
               type="button"
               onClick={handleEmailDirect}
               disabled={submitting || !email.trim()}
-              className="flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-500 py-2.5 text-sm font-medium text-white hover:bg-emerald-600 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+              className="flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 py-2.5 text-sm font-medium text-white shadow-md shadow-indigo-500/25 hover:from-indigo-600 hover:to-violet-700 transition-all disabled:opacity-60 disabled:cursor-not-allowed active:scale-[0.99]"
               title="Log in or sign up using just your email address — no password required."
             >
               <Mail className="h-4 w-4" />
@@ -315,7 +315,7 @@ function LoginScreenInner() {
                     value={name}
                     onChange={(e) => setName(e.target.value)}
                     required
-                    className="w-full rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-950 py-2.5 pl-9 pr-3 text-sm text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
+                    className="w-full rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-950 py-2.5 pl-9 pr-3 text-sm text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 transition-shadow"
                   />
                 </div>
               </div>
@@ -339,7 +339,7 @@ function LoginScreenInner() {
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   required
-                  className="w-full rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-950 py-2.5 pl-9 pr-3 text-sm text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
+                  className="w-full rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-950 py-2.5 pl-9 pr-3 text-sm text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 transition-shadow"
                 />
               </div>
             </div>
@@ -367,7 +367,7 @@ function LoginScreenInner() {
                   onChange={(e) => setPassword(e.target.value)}
                   required
                   minLength={mode === "signup" ? 6 : undefined}
-                  className="w-full rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-950 py-2.5 pl-9 pr-9 text-sm text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
+                  className="w-full rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-950 py-2.5 pl-9 pr-9 text-sm text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 transition-shadow"
                 />
                 <button
                   type="button"
@@ -386,7 +386,7 @@ function LoginScreenInner() {
             </div>
 
             {error && (
-              <div className="rounded-lg border border-red-200 dark:border-red-900 bg-red-50 dark:bg-red-950/40 px-3 py-2 text-xs text-red-700 dark:text-red-300">
+              <div className="rounded-xl border border-red-200 dark:border-red-900 bg-red-50 dark:bg-red-950/40 px-3 py-2 text-xs text-red-700 dark:text-red-300">
                 {error}
               </div>
             )}
@@ -394,7 +394,7 @@ function LoginScreenInner() {
             <button
               type="submit"
               disabled={submitting}
-              className="flex w-full items-center justify-center gap-2 rounded-lg bg-zinc-900 dark:bg-zinc-100 py-2.5 text-sm font-medium text-white dark:text-zinc-900 hover:opacity-90 transition-opacity disabled:opacity-60 disabled:cursor-not-allowed"
+              className="flex w-full items-center justify-center gap-2 rounded-xl bg-zinc-900 dark:bg-zinc-100 py-2.5 text-sm font-medium text-white dark:text-zinc-900 hover:opacity-90 transition-opacity disabled:opacity-60 disabled:cursor-not-allowed shadow-md active:scale-[0.99]"
             >
               {submitting && <Loader2 className="h-4 w-4 animate-spin" />}
               {mode === "login" ? "Sign in" : "Create account"}
@@ -408,7 +408,7 @@ function LoginScreenInner() {
                 <button
                   type="button"
                   onClick={() => switchMode("signup")}
-                  className="font-medium text-emerald-600 dark:text-emerald-400 hover:underline"
+                  className="font-medium text-indigo-600 dark:text-indigo-400 hover:underline"
                 >
                   Sign up
                 </button>
@@ -419,7 +419,7 @@ function LoginScreenInner() {
                 <button
                   type="button"
                   onClick={() => switchMode("login")}
-                  className="font-medium text-emerald-600 dark:text-emerald-400 hover:underline"
+                  className="font-medium text-indigo-600 dark:text-indigo-400 hover:underline"
                 >
                   Sign in
                 </button>
@@ -446,10 +446,10 @@ export function LoginScreen() {
   return (
     <Suspense
       fallback={
-        <div className="flex min-h-screen w-full items-center justify-center bg-zinc-50 dark:bg-zinc-950 px-4 py-8">
+        <div className="flex min-h-screen w-full items-center justify-center bg-gradient-to-br from-zinc-50 via-indigo-50/30 to-violet-50/30 dark:from-zinc-950 dark:via-indigo-950/20 dark:to-violet-950/20 px-4 py-8">
           <div className="w-full max-w-md text-center">
-            <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-emerald-400 to-emerald-600 text-white shadow-lg">
-              <Loader2 className="h-7 w-7 animate-spin" />
+            <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-500 via-violet-500 to-purple-600 text-white shadow-lg shadow-indigo-500/30 ring-1 ring-white/20">
+              <Loader2 className="h-8 w-8 animate-spin" />
             </div>
             <p className="text-sm text-zinc-500 dark:text-zinc-400">Loading…</p>
           </div>

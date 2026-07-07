@@ -1245,3 +1245,54 @@ Stage Summary:
       src/app/api/auth/login/route.ts (nullable passwordHash handling)
       .env.example (Google OAuth setup guide)
   - DB migration applied via `prisma db push` (backward-compatible).
+
+---
+Task ID: 20
+Agent: main
+Task: Verify production readiness end-to-end after vector search implementation.
+
+Work Log:
+- Re-checked the conversation state — vector search code already shipped:
+  * prisma/schema.prisma → Transcript + TranscriptChunk models (BLOB embedding column)
+  * src/lib/embeddings.ts → Xenova/all-MiniLM-L6-v2 local embeddings (384-dim, lazy-loaded)
+  * src/lib/vector-search.ts → cosine similarity + topK + retrieveRelevantChunks
+  * src/app/api/youtube-load/route.ts → persistTranscript() + embedTranscriptInBackground()
+  * src/app/api/chat/route.ts → retrieveRelevantChunks() tries vector first, falls back to LLM-as-retriever
+  * src/lib/__tests__/vector-search.test.ts → unit tests
+- Verified the production toolchain runs clean:
+  * bun test → 172 pass / 0 fail / 732 expect() calls (9 files)
+  * npx tsc --noEmit → 0 errors
+  * npx eslint . → 0 errors (3 cosmetic unused-disable warnings only)
+  * npm run build → clean build in 21.5s, 17 routes registered, standalone output produced (172 MB with deps)
+- Ran end-to-end smoke tests against the production standalone server on :3000:
+  1. GET /api/health → 200, DB check ok (1ms)
+  2. GET /api/auth/email-direct/enabled → 200 {"enabled":true}
+  3. GET /api/auth/me (no cookie) → 200 {"user":null}
+  4. GET /api/auth/google (no env) → 503 with clear setup message (intentional graceful degradation)
+  5. POST /api/auth/signup → 200, new user created, session cookie set
+  6. GET /api/auth/me (with cookie) → 200 returns the new user
+  7. POST /api/chat "Say hi in 5 words" → 200 in 5.07s, "Hello there, how are you?"
+  8. POST /api/auth/logout → 200, session destroyed
+  9. GET /api/auth/me (after logout) → 200 {"user":null}
+- Ran a vector-search end-to-end smoke test (scripts/vector-smoke.mjs):
+  * First-call model download of Xenova/all-MiniLM-L6-v2 (~25 MB) succeeded in ~3s
+  * Embedded 3 distinct chunks → got 3/3 embeddings, dim=384
+  * Persisted transcript + chunks with BLOB embeddings via Prisma
+  * Query "What is ATP?" → top result was chunk 0 (mitochondria), score 0.631 ✓
+  * Query "When did humans land on the moon?" → top result was chunk 2 (Apollo 11), score 0.721 ✓
+  * Both queries correctly ranked the semantically relevant chunk first
+- Verified DB schema is live in production:
+  * Tables: Session, User, Transcript, TranscriptChunk (all present)
+  * 0 transcripts/chunks currently (none loaded via UI yet) — schema is ready
+- Re-packaged the production-ready app into download/summarai-app.tar.gz (432 KB, no node_modules or .git)
+
+Stage Summary:
+- ✅ Application is production-ready.
+- Vector search is fully wired end-to-end:
+  * At /api/youtube-load time: transcript persisted to DB, chunks embedded in background
+  * At /api/chat time: question embedded, top-K chunks retrieved via cosine similarity
+  * Falls back to LLM-as-retriever if (a) transcript not in DB, (b) embeddings not ready yet, or (c) embedding model fails — chat still works in all cases
+- 172/172 unit tests pass, typecheck clean, ESLint clean, production build clean
+- All 9 e2e smoke endpoints return expected status codes and bodies
+- Vector search smoke test proves the embedding pipeline + cosine similarity + DB persistence + retrieval all work correctly with semantically-meaningful results
+- Archive available at /home/z/my-project/download/summarai-app.tar.gz

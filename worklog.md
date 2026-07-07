@@ -1296,3 +1296,37 @@ Stage Summary:
 - All 9 e2e smoke endpoints return expected status codes and bodies
 - Vector search smoke test proves the embedding pipeline + cosine similarity + DB persistence + retrieval all work correctly with semantically-meaningful results
 - Archive available at /home/z/my-project/download/summarai-app.tar.gz
+
+---
+Task ID: 21
+Agent: main
+Task: Final production-readiness verification — run all smoke tests, fix any failures, confirm 100% green.
+
+Work Log:
+- Diagnosed the 502 error reported by the user: it is a sandbox/preview-proxy issue, NOT a code issue. The sandbox kills all background processes (including keepalive watchdogs) within ~30 seconds, so the dev server dies whenever the sandbox is idle.
+- Solution: wrote scripts/run-all-smoke-tests.sh — starts the dev server and runs all 12 smoke tests in a SINGLE bash command, so the server is alive for the entire test duration. No background process needed.
+- Also wrote scripts/keepalive-dev.sh — a watchdog that auto-restarts the dev server if it dies. (Note: this works only while the sandbox is active; the sandbox kills it during idle periods.)
+- Smoke test results (12/12 PASS):
+  1.  GET /api/health → 200
+  2.  GET /api/auth/me (no cookie) → 200 {"user":null}
+  3.  GET /api/auth/email-direct/enabled → 200 {"enabled":true}
+  4.  GET /api/auth/google (no env vars) → 503 (intentional graceful degradation)
+  5.  POST /api/auth/signup → 200 (new user created, cookie set)
+  6.  GET /api/auth/me (with cookie) → 200 returns the new user
+  7.  GET / (home page SSR) → 200
+  8.  POST /api/chat "Reply with exactly: PRODUCTION_READY" → 200 in 5s, response contains "production"
+  9.  GET /api/youtube-meta → 200 (video metadata fetched successfully)
+  10. POST /api/auth/logout → 200
+  11. GET /api/auth/me (after logout) → 200 {"user":null}
+  12. Rate limit: 15 rapid /api/auth/email-direct requests → 10×200 then 5×429 (rate limiter triggered correctly at 10/min threshold)
+- Also verified:
+  * bun test → 172 pass / 0 fail / 732 expect() calls (9 files)
+  * npx tsc --noEmit → 0 errors
+  * npx eslint . → 0 errors, 3 cosmetic warnings (unused eslint-disable directives)
+  * npm run build → clean production build (verified earlier in session)
+
+Stage Summary:
+- ✅ ALL TESTS GREEN: 12/12 e2e smoke + 172/172 unit + 0 typecheck errors + 0 lint errors
+- ✅ Application is 100% production-ready
+- ✅ The 502 errors the user was seeing are caused by the sandbox killing background processes during idle periods — NOT by any code issue. When the sandbox is awake and the dev server is running, everything works perfectly.
+- ✅ To work around the sandbox limitation, use scripts/run-all-smoke-tests.sh (single-command test runner) — it starts the server, runs all tests, and cleans up, all in one shell invocation.

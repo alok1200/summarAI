@@ -1,0 +1,943 @@
+     1→/**
+     2→ * Shared YouTube transcript fetcher.
+     3→ *
+     4→ * Used by both `/api/youtube-summary` and `/api/youtube-interview` so that any
+     5→ * improvement to the multi-strategy fetcher benefits both endpoints.
+     6→ *
+     7→ * Strategies (tried in order):
+     8→ *   1. InnerTube ANDROID player API      — bypasses JS challenges (20.10.38)
+     9→ *   2. Watch-page HTML scrape            — works for many public videos
+    10→ *   3. youtube-transcript npm package     — different fingerprint
+    11→ *   4. youtubei.js (Innertube WEB)       — maintained library fallback
+    12→ *
+    13→ * All strategies reuse a warmed cookie jar (CONSENT + VISITOR_INFO1_LIVE) so
+    14→ * YouTube treats them as a returning browser session rather than a cold bot.
+    15→ * A 1.5s backoff is used between strategies when a 429 / "Sign in" / captcha
+    16→ * signature is detected, giving YouTube's rate-limiter time to cool down.
+    17→ *
+    18→ * If any strategy reports a bot-block signature, the final error is classified
+    19→ * as BOT_BLOCKED so the caller can surface a graceful "try again later"
+    20→ * message — the manual-paste fallback was removed from the UI.
+    21→ */
+    22→
+    23→export interface TranscriptSegment {
+    24→  start: number; // seconds
+    25→  dur: number; // seconds
+    26→  text: string;
+    27→}
+    28→
+    29→export interface VideoMeta {
+    30→  title: string;
+    31→  author: string;
+    32→  thumbnailUrl: string;
+    33→}
+    34→
+    35→export interface BotBlockedError extends Error {
+    36→  code: "BOT_BLOCKED";
+    37→}
+    38→
+    39→const UA =
+    40→  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
+    41→  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+    42→
+    43→/**
+    44→ * Optional reverse-proxy prefix for ALL outbound YouTube requests.
+    45→ *
+    46→ * When `YOUTUBE_PROXY_URL` is set in the environment, every `fetch()` we make
+    47→ * to `www.youtube.com` (cookie warming, InnerTube player, watch-page scrape,
+    48→ * timedtext caption fetch) is rerouted through this proxy by URL-prefixing:
+    49→ *
+    50→ *   original:  https://www.youtube.com/watch?v=ID
+    51→ *   proxied:   ${YOUTUBE_PROXY_URL}https://www.youtube.com/watch?v=ID
+    52→ *
+    53→ * The proxy is expected to be a simple reverse proxy (Cloudflare Worker /
+    54→ * nginx / Caddy / a tiny Express app) running on a DIFFERENT IP than this
+    55→ * server. YouTube's IP-level rate limiter will then see the proxy's IP, not
+    56→ * ours — which is the only client-side workaround for the "Sign in to
+    57→ * confirm you're not a bot" block that affects all 4 in-process strategies
+    58→ * simultaneously.
+    59→ *
+    60→ * Format: a fully-qualified URL prefix, e.g.
+    61→ *   YOUTUBE_PROXY_URL="https://my-yt-proxy.example.workers.dev/?url="
+    62→ *   YOUTUBE_PROXY_URL="https://user:pass@proxy.example.com/"
+    63→ *
+    64→ * Leave empty (the default) → all requests go direct from this server's IP.
+    65→ *
+    66→ * NOTE: this only proxies OUR fetches. The youtube-transcript npm package and
+    67→ * youtubei.js make their own internal fetches that we can't intercept, so
+    68→ * those strategies still hit YouTube directly. The proxy primarily helps
+    69→ * strategies 1 (ANDROID) and 2 (watch-page) — which are the most reliable
+    70→ * anyway.
+    71→ */
+    72→function proxiedFetch(
+    73→  url: string,
+    74→  init?: RequestInit
+    75→): Promise<Response> {
+    76→  const proxy = process.env.YOUTUBE_PROXY_URL;
+    77→  if (proxy && proxy.trim() !== "") {
+    78→    return fetch(`${proxy}${url}`, init);
+    79→  }
+    80→  return fetch(url, init);
+    81→}
+    82→
+    83→/**
+    84→ * Whether the YOUTUBE_PROXY_URL override is currently configured. Surfaced
+    85→ * so the bot-blocked error message can tell the operator what to do
+    86→ * (configure a proxy) versus what to tell the end user (paste transcript).
+    87→ */
+    88→export function isYouTubeProxyConfigured(): boolean {
+    89→  const v = process.env.YOUTUBE_PROXY_URL;
+    90→  return !!v && v.trim() !== "";
+    91→}
+    92→
+    93→/**
+    94→ * Warmed cookie jar — fetched ONCE per process (and refreshed if older than
+    95→ * 10 min). YouTube sets `CONSENT` and `VISITOR_INFO1_LIVE` cookies on the
+    96→ * first request to youtube.com; subsequent requests that carry these cookies
+    97→ * look like a returning browser session, which dramatically reduces the
+    98→ * chance of getting a 429 / "Sign in to confirm you're not a bot" response.
+    99→ */
+   100→interface CookieJar {
+   101→  cookieHeader: string; // e.g. "CONSENT=YES+; VISITOR_INFO1_LIVE=abc"
+   102→  fetchedAt: number;
+   103→}
+   104→let warmedCookies: CookieJar | null = null;
+   105→const COOKIE_TTL_MS = 1000 * 60 * 10; // 10 minutes
+   106→
+   107→async function warmCookies(): Promise<string> {
+   108→  if (warmedCookies && Date.now() - warmedCookies.fetchedAt < COOKIE_TTL_MS) {
+   109→    return warmedCookies.cookieHeader;
+   110→  }
+   111→  try {
+   112→    const res = await proxiedFetch("https://www.youtube.com/", {
+   113→      headers: {
+   114→        "User-Agent": UA,
+   115→        "Accept-Language": "en-US,en;q=0.9",
+   116→        Accept:
+   117→          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+   118→        "Sec-Fetch-Dest": "document",
+   119→        "Sec-Fetch-Mode": "navigate",
+   120→        "Sec-Fetch-Site": "none",
+   121→        "Upgrade-Insecure-Requests": "1",
+   122→      },
+   123→      redirect: "follow",
+   124→    });
+   125→    const setCookies = res.headers.getSetCookie?.() ?? [];
+   126→    const pairs: string[] = [];
+   127→    for (const sc of setCookies) {
+   128→      const m = sc.match(/^([^=]+)=([^;]+)/);
+   129→      if (m) pairs.push(`${m[1]}=${m[2]}`);
+   130→    }
+   131→    const header = pairs.length > 0 ? pairs.join("; ") : "";
+   132→    warmedCookies = { cookieHeader: header, fetchedAt: Date.now() };
+   133→    console.log(
+   134→      `[youtube] Warmed ${pairs.length} cookies: ${pairs
+   135→        .map((p) => p.split("=")[0])
+   136→        .join(", ")}`
+   137→    );
+   138→    return header;
+   139→  } catch {
+   140→    // Cookie warming is best-effort — strategies still work without it,
+   141→    // just with a higher block rate.
+   142→    return "";
+   143→  }
+   144→}
+   145→
+   146→// In-memory caches
+   147→interface CacheEntry {
+   148→  segments: TranscriptSegment[];
+   149→  fetchedAt: number;
+   150→}
+   151→const transcriptCache = new Map<string, CacheEntry>();
+   152→const CACHE_TTL_MS = 1000 * 60 * 10; // 10 minutes
+   153→
+   154→interface MetaCacheEntry extends VideoMeta {
+   155→  fetchedAt: number;
+   156→}
+   157→const metaCache = new Map<string, MetaCacheEntry>();
+   158→const META_CACHE_TTL_MS = 1000 * 60 * 60; // 1 hour
+   159→
+   160→export function extractVideoId(url: string): string | null {
+   161→  const patterns: RegExp[] = [
+   162→    /(?:youtube\.com\/watch\?v=)([A-Za-z0-9_-]{11})/,
+   163→    /(?:youtu\.be\/)([A-Za-z0-9_-]{11})/,
+   164→    /(?:youtube\.com\/embed\/)([A-Za-z0-9_-]{11})/,
+   165→    /(?:youtube\.com\/shorts\/)([A-Za-z0-9_-]{11})/,
+   166→    /(?:youtube\.com\/live\/)([A-Za-z0-9_-]{11})/,
+   167→  ];
+   168→  for (const p of patterns) {
+   169→    const m = url.match(p);
+   170→    if (m) return m[1];
+   171→  }
+   172→  if (/^[A-Za-z0-9_-]{11}$/.test(url.trim())) return url.trim();
+   173→  return null;
+   174→}
+   175→
+   176→export function parseTimeString(s: string): number | undefined {
+   177→  const trimmed = s.trim();
+   178→  if (!trimmed) return undefined;
+   179→  // Support optional "m" / "s" / "h" unit suffixes for explicit input, e.g.:
+   180→  //   "5m"     → 5 minutes        "90s"   → 90 seconds
+   181→  //   "1h"     → 1 hour           "1h30m" → 1h30m
+   182→  //   "2h15m30s" → 2h15m30s       "1h 30m" → 1h30m (spaces ok)
+   183→  // These always win over the bare-number rule below.
+   184→  if (/[hms]/i.test(trimmed) && /^[\d\s.:hms]+$/i.test(trimmed)) {
+   185→    const h = trimmed.match(/(\d+)\s*h/i);
+   186→    const m = trimmed.match(/(\d+)\s*m/i);
+   187→    const sec = trimmed.match(/(\d+)\s*s/i);
+   188→    if (h || m || sec) {
+   189→      let total = 0;
+   190→      if (h) total += parseInt(h[1], 10) * 3600;
+   191→      if (m) total += parseInt(m[1], 10) * 60;
+   192→      if (sec) total += parseInt(sec[1], 10);
+   193→      return total;
+   194→    }
+   195→  }
+   196→  const parts = trimmed.split(":").map((p) => parseInt(p, 10));
+   197→  if (parts.some((n) => isNaN(n))) return undefined;
+   198→  // BARE NUMBER → MINUTES (so "5" means 5 min, not 5 sec).
+   199→  // This matches how a human naturally thinks about video timestamps:
+   200→  // "skip to 5" = the 5-minute mark, not 5 seconds in.
+   201→  if (parts.length === 1) return parts[0] * 60;
+   202→  if (parts.length === 2) return parts[0] * 60 + parts[1];
+   203→  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+   204→  return undefined;
+   205→}
+   206→
+   207→export function formatTime(s: number): string {
+   208→  const h = Math.floor(s / 3600);
+   209→  const m = Math.floor((s % 3600) / 60);
+   210→  const sec = Math.floor(s % 60);
+   211→  const pad = (n: number) => n.toString().padStart(2, "0");
+   212→  return h > 0 ? `${h}:${pad(m)}:${pad(sec)}` : `${m}:${pad(sec)}`;
+   213→}
+   214→
+   215→/**
+   216→ * Shared instructions injected into every YouTube LLM prompt so the AI always
+   217→ * cites timestamps the SAME way — by COPYING them verbatim from the transcript,
+   218→ * not by inventing or reformatting them.
+   219→ *
+   220→ * This is the fix for "AI not providing timeline properly":
+   221→ *   - The transcript already shows timestamps in M:SS (short videos) or
+   222→ *     H:MM:SS (long videos) format. The LLM was previously told to always
+   223→ *     use [MM:SS], which conflicted with the transcript for hour-plus videos
+   224→ *     and caused it to drop or hallucinate timestamps.
+   225→ *   - Now we tell it: copy the timestamp EXACTLY as it appears in the
+   226→ *     transcript, in square brackets, and never invent one.
+   227→ */
+   228→export const TIMESTAMP_RULES =
+   229→  `TIMESTAMP CITATION RULES (very important):\n` +
+   230→  `- The transcript is prefixed with timestamps like [3:25] or [1:25:30]. ` +
+   231→  `ALWAYS copy the timestamp EXACTLY as it appears in the transcript — same digits, same format.\n` +
+   232→  `- For videos under 1 hour, timestamps look like [M:SS] (e.g. [3:25], [12:08]). ` +
+   233→  `For videos 1 hour or longer, they look like [H:MM:SS] (e.g. [1:25:30], [2:05:14]). ` +
+   234→  `Match whatever format you see in the transcript — do NOT convert between them.\n` +
+   235→  `- NEVER invent a timestamp that doesn't appear in the transcript. If you're unsure ` +
+   236→  `which timestamp to cite, find the closest one in the transcript and use that.\n` +
+   237→  `- Every major claim, definition, example, demo, quote, or notable moment MUST be ` +
+   238→  `followed by its [timestamp] in square brackets so the user can jump to that moment.\n` +
+   239→  `- When covering a topic that spans a range of time, cite the range like ` +
+   240→  `[3:25]–[7:48] (using an en-dash). For a single moment, cite a single [timestamp].\n` +
+   241→  `- In the Chapter Index (or any "jump to" list), list time ranges as ` +
+   242→  `[start]–[end] with a short title, e.g. "[3:25]–[7:48] React hooks intro".`;
+   243→
+   244→/**
+   245→ * Shared instructions that define EXACTLY what a good TL;DR looks like.
+   246→ *
+   247→ * The previous TL;DR instruction asked for "4-6 sentences naming every topic"
+   248→ * which produced a wall-of-text paragraph that nobody wanted to read. A real
+   249→ * TL;DR is short, scannable, and gives the bottom line — it is NOT a list of
+   250→ * every topic (that's what the Detailed Breakdown is for).
+   251→ *
+   252→ * This format is enforced across:
+   253→ *   - /api/youtube-summary short-video prompt
+   254→ *   - /api/youtube-summary MAP / SECTION / REDUCE prompts
+   255→ *   - /api/youtube-interview system prompt
+   256→ *   - /api/chat (ask-about-video) system prompt
+   257→ *
+   258→ * Format: 1 punchy bottom-line sentence + 3-5 bold scannable bullets + 1-line
+   259→ * "best for" audience note. No walls of text.
+   260→ */
+   261→export const TLDR_FORMAT =
+   262→  `\n\nTL;DR FORMAT (mandatory — do NOT turn this into a wall of text):\n` +
+   263→  `The "## TL;DR" section MUST follow this exact shape:\n` +
+   264→  `1. ONE opening sentence (≤ 25 words) that states the bottom line — what the video is about and why it matters. ` +
+   265→  `Do NOT list every topic here; just say the single most important thing.\n` +
+   266→  `2. Then 3–5 bold bullets, each ≤ 15 words, capturing the key takeaways. ` +
+   267→  `Each bullet = ONE concrete insight, finding, or recommendation — NOT a topic name.\n` +
+   268→  `3. End with one italic line: "_Best for: <who should watch this video, e.g. beginners / React devs / data engineers>_."\n\n` +
+   269→  `Example of a GOOD TL;DR:\n` +
+   270→  `   ## TL;DR\n` +
+   271→  `   A 30-minute deep-dive into React Server Components — what they are, when to use them, and the gotchas the docs don't mention.\n\n` +
+   272→  `   - **RSC renders on the server, ships zero JS to the client** — biggest perf win for content-heavy pages.\n` +
+   273→  `   - **'use client' is opt-in per file** — defaults are server, mark client only when you need state/effects.\n` +
+   274→  `   - **Data fetching belongs in async server components** — no more useEffect + fetch boilerplate.\n` +
+   275→  `   - **Watch out: context doesn't cross the server/client boundary** — pass props or use a provider.\n` +
+   276→  `   - **Next.js App Router = RSC by default** — migrating from Pages Router is the easiest way to try them.\n\n` +
+   277→  `   _Best for: React developers familiar with hooks who want to understand the App Router's mental model._\n\n` +
+   278→  `DO NOT write a 4-6 sentence paragraph. DO NOT list every topic — that's what the Detailed Breakdown is for. ` +
+   279→  `Keep it punchy, scannable, and useful in 10 seconds.`;
+   280→
+   281→/**
+   282→ * Shared instructions that force the AI to produce a DENSE, COMPLETE
+   283→ * minute-by-minute timeline of the video — covering every 1–5 minute
+   284→ * interval so the user can jump to any moment and understand what's there.
+   285→ *
+   286→ * This is the answer to "provide all timestamps like 1min to 5min — provide
+   287→ * all details": the AI must walk through the ENTIRE video, picking the most
+   288→ * informative timestamp in every ~1–5 minute window, and writing a 1–3
+   289→ * sentence note about what happens there. No gaps, no skipping.
+   290→ *
+   291→ * Used in /api/youtube-summary (short-video call + map/section/reduce) and
+   292→ * /api/youtube-interview, so EVERY output ends with a complete timeline the
+   293→ * user can scan end-to-end.
+   294→ */
+   295→export const TIMELINE_RULES =
+   296→  `\n\nMINUTE-BY-MINUTE TIMELINE (mandatory section — never skip):\n` +
+   297→  `You MUST end every output with a section titled exactly:\n` +
+   298→  `   ## ⏱️ Minute-by-Minute Timeline\n\n` +
+   299→  `Rules for this section:\n` +
+   300→  `- Walk through the ENTIRE video from start to end. Do NOT skip any part.\n` +
+   301→  `- Pick ONE representative timestamp for every ~1–5 minute window of the video. ` +
+   302→  `For a 30-minute video that means ~6–30 entries; for a 2-hour video, ~24–120 entries. ` +
+   303→  `It is better to have MORE entries than fewer — never leave a 5-minute gap with no entry.\n` +
+   304→  `- Each entry MUST be a Markdown bullet in this exact format:\n` +
+   305→  `    - [MM:SS] short title — 1–3 sentence description of what happens at this moment. ` +
+   306→  `Copy the timestamp EXACTLY from the transcript (use [H:MM:SS] if the video is 1 hour+).\n` +
+   307→  `- The timestamps MUST be in ascending order with no duplicates.\n` +
+   308→  `- Cover EVERY topic, demo, example, definition, transition, and notable moment — ` +
+   309→  `the user should be able to scan this list and find ANY part of the video.\n` +
+   310→  `- Do NOT invent timestamps. If you are unsure, find the closest real timestamp ` +
+   311→  `in the transcript and use that.\n` +
+   312→  `- After the bullets, add a one-line summary: "Total covered: [start]–[end], N moments."\n\n` +
+   313→  `Example of the expected format:\n` +
+   314→  `   ## ⏱️ Minute-by-Minute Timeline\n` +
+   315→  `   - [0:42] Channel intro — host introduces the topic and today's agenda.\n` +
+   316→  `   - [3:15] First concept — definition of X with a quick analogy.\n` +
+   317→  `   - [7:50] Code demo — walks through a minimal example in the editor.\n` +
+   318→  `   - [12:08] Common pitfall — explains why naive approach fails.\n` +
+   319→  `   ...\n` +
+   320→  `   Total covered: [0:00]–[28:45], 18 moments.\n`;
+   321→
+   322→/**
+   323→ * Build the LANGUAGE INSTRUCTION block that gets appended to YouTube-related
+   324→ * system prompts.
+   325→ *
+   326→ * Behavior:
+   327→ *   - If `language` is empty/undefined → returns an empty string. The LLM
+   328→ *     uses its default (English) — preserves the original "out of the box"
+   329→ *     behavior when the user doesn't pick a language.
+   330→ *   - If `language` is set (e.g. "Hindi", "Spanish", "Japanese", "français")
+   331→ *     → returns a strict instruction telling the LLM to write the entire
+   332→ *     response in that language, while keeping timestamps, code, and
+   333→ *     technical terms in their original form.
+   334→ *
+   335→ * This is shared across /api/youtube-summary, /api/youtube-interview,
+   336→ * /api/youtube-load, and /api/chat (ask-about-video mode) so the user's
+   337→ * language preference is honored everywhere consistently.
+   338→ */
+   339→export function buildLanguageInstruction(language?: string): string {
+   340→  const trimmed = (language ?? "").trim();
+   341→  if (!trimmed) return "";
+   342→  return (
+   343→    `\n\nLANGUAGE INSTRUCTION (very important):\n` +
+   344→    `- Write the ENTIRE response in ${trimmed}. This includes the TL;DR, every section heading, ` +
+   345→    `every explanation, every quote/insight, the chapter index, and any tips or notes.\n` +
+   346→    `- Keep timestamps (e.g. [3:25], [1:25:30]), code snippets, file paths, URLs, library/framework ` +
+   347→    `names, and command-line tools in their ORIGINAL form — do NOT translate them.\n` +
+   348→    `- If the transcript is in a different language, still answer in ${trimmed}. Translate ` +
+   349→    `quoted speech when needed, but keep the timestamp markers intact.\n` +
+   350→    `- Use natural, fluent ${trimmed} appropriate for a technical audience. Avoid awkward ` +
+   351→    `literal translations of idioms or domain terms that have well-known ${trimmed} equivalents.`
+   352→  );
+   353→}
+   354→
+   355→function decodeEntities(s: string): string {
+   356→  return s
+   357→    .replace(/&amp;/g, "&")
+   358→    .replace(/&#39;/g, "'")
+   359→    .replace(/&quot;/g, '"')
+   360→    .replace(/&lt;/g, "<")
+   361→    .replace(/&gt;/g, ">")
+   362→    .replace(/&nbsp;/g, " ");
+   363→}
+   364→
+   365→interface CaptionTrack {
+   366→  languageCode: string;
+   367→  kind?: string;
+   368→  name?: { simpleText?: string; runs?: { text: string }[] };
+   369→  baseUrl: string;
+   370→}
+   371→
+   372→/**
+   373→ * Fetch lightweight video metadata (title, author, thumbnail).
+   374→ *
+   375→ * Strategy A: If YOUTUBE_API_KEY is set in the environment, use the official
+   376→ *             YouTube Data API v3 (most reliable — no bot protection).
+   377→ * Strategy B: Fall back to YouTube's public oEmbed endpoint (no key needed,
+   378→ *             but can fail on bot-protected / age-restricted videos).
+   379→ *
+   380→ * Results are cached for META_CACHE_TTL_MS to avoid redundant fetches.
+   381→ */
+   382→export async function fetchVideoMeta(
+   383→  videoId: string
+   384→): Promise<VideoMeta | null> {
+   385→  const cached = metaCache.get(videoId);
+   386→  if (cached && Date.now() - cached.fetchedAt < META_CACHE_TTL_MS) {
+   387→    return cached;
+   388→  }
+   389→
+   390→  // Strategy A: Official YouTube Data API v3 (most reliable — no bot protection).
+   391→  // Only used if YOUTUBE_API_KEY is set in the environment.
+   392→  const apiKey = process.env.YOUTUBE_API_KEY;
+   393→  if (apiKey && apiKey.trim() !== "") {
+   394→    try {
+   395→      const url =
+   396→        `https://www.googleapis.com/youtube/v3/videos` +
+   397→        `?part=snippet&id=${videoId}&key=${encodeURIComponent(apiKey)}`;
+   398→      const res = await fetch(url, {
+   399→        headers: { "Accept-Language": "en-US,en;q=0.9" },
+   400→      });
+   401→      if (res.ok) {
+   402→        const json = (await res.json()) as {
+   403→          items?: Array<{
+   404→            snippet?: {
+   405→              title?: string;
+   406→              channelTitle?: string;
+   407→              thumbnails?: {
+   408→                high?: { url?: string };
+   409→                medium?: { url?: string };
+   410→                default?: { url?: string };
+   411→              };
+   412→            };
+   413→          }>;
+   414→        };
+   415→        const item = json.items?.[0];
+   416→        if (item?.snippet?.title) {
+   417→          const entry: MetaCacheEntry = {
+   418→            title: item.snippet.title,
+   419→            author: item.snippet.channelTitle || "Unknown",
+   420→            thumbnailUrl:
+   421→              item.snippet.thumbnails?.high?.url ||
+   422→              item.snippet.thumbnails?.medium?.url ||
+   423→              item.snippet.thumbnails?.default?.url ||
+   424→              `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`,
+   425→            fetchedAt: Date.now(),
+   426→          };
+   427→          metaCache.set(videoId, entry);
+   428→          return entry;
+   429→        }
+   430→      }
+   431→    } catch {
+   432→      // Fall through to oEmbed strategy below.
+   433→    }
+   434→  }
+   435→
+   436→  // Strategy B: Public oEmbed endpoint (no API key needed, but can fail on
+   437→  // bot-protected / age-restricted videos).
+   438→  try {
+   439→    const res = await fetch(
+   440→      `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`,
+   441→      { headers: { "User-Agent": UA, "Accept-Language": "en-US,en;q=0.9" } }
+   442→    );
+   443→    if (!res.ok) return null;
+   444→    const json = (await res.json()) as {
+   445→      title?: string;
+   446→      author_name?: string;
+   447→      thumbnail_url?: string;
+   448→    };
+   449→    if (!json.title) return null;
+   450→    const entry: MetaCacheEntry = {
+   451→      title: json.title,
+   452→      author: json.author_name || "Unknown",
+   453→      thumbnailUrl:
+   454→        json.thumbnail_url ||
+   455→        `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`,
+   456→      fetchedAt: Date.now(),
+   457→    };
+   458→    metaCache.set(videoId, entry);
+   459→    return entry;
+   460→  } catch {
+   461→    return null;
+   462→  }
+   463→}
+   464→
+   465→// Strategy 1: InnerTube ANDROID player API
+   466→// Uses clientVersion 20.10.38 — the most permissive YouTube ANDROID client
+   467→// version we've tested. Newer versions (19.29.37, 19.x, 20.x with osName)
+   468→// get rejected with HTTP 400; older versions work but get "Sign in to confirm
+   469→// you're not a bot" more often. 20.10.38 is the sweet spot.
+   470→//
+   471→// The ANDROID client bypasses YouTube's JS challenge / consent page since
+   472→// the mobile API doesn't go through the web player at all.
+   473→async function fetchCaptionTracksViaAndroidPlayer(
+   474→  videoId: string
+   475→): Promise<CaptionTrack[] | null> {
+   476→  const body = {
+   477→    context: {
+   478→      client: {
+   479→        clientName: "ANDROID",
+   480→        clientVersion: "20.10.38",
+   481→        androidSdkVersion: 30,
+   482→        hl: "en",
+   483→        gl: "US",
+   484→      },
+   485→    },
+   486→    videoId,
+   487→  };
+   488→
+   489→  const res = await proxiedFetch(
+   490→    "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
+   491→    {
+   492→      method: "POST",
+   493→      headers: {
+   494→        "User-Agent":
+   495→          "com.google.android.youtube/20.10.38 (Linux; U; Android 11) gzip",
+   496→        "Content-Type": "application/json",
+   497→        "Accept-Language": "en-US,en;q=0.9",
+   498→      },
+   499→      body: JSON.stringify(body),
+   500→    }
+   501→  );
+   502→
+   503→  if (!res.ok) {
+   504→    throw new Error(`YouTube ANDROID player API returned HTTP ${res.status}`);
+   505→  }
+   506→
+   507→  const json = await res.json();
+   508→  const playability = json?.playabilityStatus;
+   509→  if (
+   510→    playability?.status !== "OK" &&
+   511→    playability?.status !== "LIVE_STREAM_OFFLINE"
+   512→  ) {
+   513→    const reason =
+   514→      playability?.reason ||
+   515→      playability?.messages?.[0] ||
+   516→      playability?.errorScreen?.playerErrorMessageRenderer?.subreason?.simpleText;
+   517→    throw new Error(
+   518→      reason || "This video cannot be accessed via the YouTube API."
+   519→    );
+   520→  }
+   521→
+   522→  const tracks =
+   523→    json?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+   524→  return Array.isArray(tracks) ? (tracks as CaptionTrack[]) : null;
+   525→}
+   526→
+   527→// Strategy 2: scrape the watch page HTML (with warmed cookies + browser headers)
+   528→async function fetchCaptionTracksViaWatchPage(
+   529→  videoId: string
+   530→): Promise<CaptionTrack[] | null> {
+   531→  const cookieHeader = await warmCookies();
+   532→  const watchUrl = `https://www.youtube.com/watch?v=${videoId}`;
+   533→  const res = await proxiedFetch(watchUrl, {
+   534→    headers: {
+   535→      "User-Agent": UA,
+   536→      "Accept-Language": "en-US,en;q=0.9",
+   537→      Accept:
+   538→        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+   539→      "Sec-Fetch-Dest": "document",
+   540→      "Sec-Fetch-Mode": "navigate",
+   541→      "Sec-Fetch-Site": "none",
+   542→      "Upgrade-Insecure-Requests": "1",
+   543→      ...(cookieHeader ? { Cookie: cookieHeader } : {}),
+   544→    },
+   545→  });
+   546→
+   547→  if (!res.ok) {
+   548→    throw new Error(`Watch page returned HTTP ${res.status}`);
+   549→  }
+   550→
+   551→  const html = await res.text();
+   552→  if (html.includes('class="g-recaptcha"') || html.length < 5000) {
+   553→    throw new Error("Watch page returned CAPTCHA / blocked response");
+   554→  }
+   555→  const match = html.match(
+   556→    /ytInitialPlayerResponse\s*=\s*(\{[\s\S]*?\})\s*;\s*(?:var\s|const\s|let\s|<\/script>|$)/
+   557→  );
+   558→  if (!match) {
+   559→    throw new Error(
+   560→      "Could not find player data on the watch page (YouTube may have changed its HTML structure)."
+   561→    );
+   562→  }
+   563→
+   564→  const playerResponse = JSON.parse(match[1]);
+   565→  const playability = playerResponse?.playabilityStatus;
+   566→  if (
+   567→    playability?.status === "ERROR" ||
+   568→    playability?.status === "LOGIN_REQUIRED"
+   569→  ) {
+   570→    throw new Error(
+   571→      playability?.reason ||
+   572→        "This video cannot be accessed (private, age-restricted, or unavailable)."
+   573→    );
+   574→  }
+   575→
+   576→  const tracks =
+   577→    playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+   578→  return Array.isArray(tracks) && tracks.length > 0
+   579→    ? (tracks as CaptionTrack[])
+   580→    : null;
+   581→}
+   582→
+   583→// Strategy 3: youtube-transcript npm package
+   584→async function fetchTranscriptViaYoutubeTranscriptLib(
+   585→  videoId: string
+   586→): Promise<TranscriptSegment[] | null> {
+   587→  try {
+   588→    const mod = await import("youtube-transcript");
+   589→    const result = await mod.YoutubeTranscript.fetchTranscript(videoId, {
+   590→      lang: "en",
+   591→    });
+   592→    if (!Array.isArray(result) || result.length === 0) return null;
+   593→    return result
+   594→      .map((r) => ({
+   595→        start: r.offset ?? 0,
+   596→        dur: r.duration ?? 0,
+   597→        text: (r.text || "").replace(/\n/g, " ").trim(),
+   598→      }))
+   599→      .filter((s) => s.text.length > 0);
+   600→  } catch (e) {
+   601→    const msg = (e as Error)?.message || "";
+   602→    throw new Error(`youtube-transcript lib: ${msg}`);
+   603→  }
+   604→}
+   605→
+   606→// Strategy 4: youtubei.js (Innertube WEB)
+   607→async function fetchTranscriptViaInnertube(
+   608→  videoId: string
+   609→): Promise<TranscriptSegment[] | null> {
+   610→  try {
+   611→    const mod = await import("youtubei.js");
+   612→    const Innertube = mod.default;
+   613→    const yt = await Innertube.create();
+   614→    const info = await yt.getInfo(videoId);
+   615→    const transcriptInfo = await info.getTranscript();
+   616→    const body = transcriptInfo?.transcript?.content?.body;
+   617→    const rawSegments: any[] = (body as any)?.initial_segments ?? [];
+   618→    if (rawSegments.length === 0) return null;
+   619→    const segments: TranscriptSegment[] = [];
+   620→    for (const s of rawSegments) {
+   621→      if (typeof s.start_ms === "undefined") continue;
+   622→      const startMs = parseInt(s.start_ms ?? "0", 10);
+   623→      const endMs = parseInt(s.end_ms ?? "0", 10);
+   624→      const text: string = s.snippet?.text ?? "";
+   625→      const cleaned = String(text).replace(/\n/g, " ").trim();
+   626→      if (cleaned.length > 0) {
+   627→        segments.push({
+   628→          start: startMs / 1000,
+   629→          dur: Math.max(0, (endMs - startMs) / 1000),
+   630→          text: cleaned,
+   631→        });
+   632→      }
+   633→    }
+   634→    return segments.length > 0 ? segments : null;
+   635→  } catch (e) {
+   636→    const msg = (e as Error)?.message || "";
+   637→    throw new Error(`youtubei.js: ${msg}`);
+   638→  }
+   639→}
+   640→
+   641→function pickBestTrack(tracks: CaptionTrack[]): CaptionTrack {
+   642→  const enManual = tracks.find(
+   643→    (t) => t.languageCode === "en" && t.kind !== "asr"
+   644→  );
+   645→  const enAuto = tracks.find(
+   646→    (t) => t.languageCode === "en" && t.kind === "asr"
+   647→  );
+   648→  return enManual || enAuto || tracks[0];
+   649→}
+   650→
+   651→function normalizeTrackUrl(url: string): string {
+   652→  if (url.includes("fmt=")) {
+   653→    return url.replace(/fmt=[^&]+/, "fmt=json3");
+   654→  }
+   655→  return url + (url.includes("?") ? "&" : "?") + "fmt=json3";
+   656→}
+   657→
+   658→function parseJson3Transcript(text: string): TranscriptSegment[] {
+   659→  const json = JSON.parse(text);
+   660→  if (!Array.isArray(json.events)) return [];
+   661→  return json.events
+   662→    .filter(
+   663→      (e: any) => e.segs && Array.isArray(e.segs) && e.segs.length > 0
+   664→    )
+   665→    .map((e: any) => ({
+   666→      start: (e.tStartMs ?? 0) / 1000,
+   667→      dur: (e.dDurationMs ?? 0) / 1000,
+   668→      text: e.segs
+   669→        .map((s: any) => (typeof s.utf8 === "string" ? s.utf8 : ""))
+   670→        .join("")
+   671→        .replace(/\n/g, " ")
+   672→        .trim(),
+   673→    }))
+   674→    .filter((s: TranscriptSegment) => s.text.length > 0);
+   675→}
+   676→
+   677→function parseXmlTranscript(text: string): TranscriptSegment[] {
+   678→  const segments: TranscriptSegment[] = [];
+   679→  const srv3Regex = /<p\s+t="(\d+)"\s+d="(\d+)"[^>]*>([\s\S]*?)<\/p>/g;
+   680→  let m: RegExpExecArray | null;
+   681→  while ((m = srv3Regex.exec(text)) !== null) {
+   682→    const start = parseInt(m[1], 10) / 1000;
+   683→    const dur = parseInt(m[2], 10) / 1000;
+   684→    const inner = m[3];
+   685→    let segText = "";
+   686→    const sRegex = /<s[^>]*>([^<]*)<\/s>/g;
+   687→    let sMatch: RegExpExecArray | null;
+   688→    while ((sMatch = sRegex.exec(inner)) !== null) {
+   689→      segText += sMatch[1];
+   690→    }
+   691→    if (!segText) segText = inner.replace(/<[^>]+>/g, "");
+   692→    segText = decodeEntities(segText).replace(/\n/g, " ").trim();
+   693→    if (segText) segments.push({ start, dur, text: segText });
+   694→  }
+   695→  if (segments.length > 0) return segments;
+   696→
+   697→  const xmlRegex =
+   698→    /<text\s+start="([\d.]+)"\s+dur="([\d.]+)"[^>]*>([\s\S]*?)<\/text>/g;
+   699→  while ((m = xmlRegex.exec(text)) !== null) {
+   700→    const start = parseFloat(m[1]);
+   701→    const dur = parseFloat(m[2]);
+   702→    const segText = decodeEntities(m[3])
+   703→      .replace(/<[^>]+>/g, "")
+   704→      .replace(/\n/g, " ")
+   705→      .trim();
+   706→    if (segText) segments.push({ start, dur, text: segText });
+   707→  }
+   708→  return segments;
+   709→}
+   710→
+   711→async function fetchAndParseCaptionTracks(
+   712→  tracks: CaptionTrack[]
+   713→): Promise<TranscriptSegment[]> {
+   714→  const track = pickBestTrack(tracks);
+   715→  const trackUrl = normalizeTrackUrl(track.baseUrl);
+   716→  const cookieHeader = await warmCookies();
+   717→
+   718→  const captionRes = await proxiedFetch(trackUrl, {
+   719→    headers: {
+   720→      "User-Agent": UA,
+   721→      "Accept-Language": "en-US,en;q=0.9",
+   722→      Origin: "https://www.youtube.com",
+   723→      Referer: "https://www.youtube.com/",
+   724→      ...(cookieHeader ? { Cookie: cookieHeader } : {}),
+   725→    },
+   726→  });
+   727→  if (!captionRes.ok) {
+   728→    throw new Error(`Failed to fetch captions (HTTP ${captionRes.status}).`);
+   729→  }
+   730→  const captionText = await captionRes.text();
+   731→
+   732→  let segments: TranscriptSegment[] = [];
+   733→  if (captionText.trim().startsWith("{")) {
+   734→    try {
+   735→      segments = parseJson3Transcript(captionText);
+   736→    } catch {
+   737→      // fall through to XML
+   738→    }
+   739→  }
+   740→  if (segments.length === 0) {
+   741→    segments = parseXmlTranscript(captionText);
+   742→  }
+   743→  if (segments.length === 0) {
+   744→    throw new Error(
+   745→      "Could not parse the transcript. The caption format may be unsupported."
+   746→    );
+   747→  }
+   748→  return segments;
+   749→}
+   750→
+   751→/**
+   752→ * Try multiple strategies in order to fetch the transcript. Each strategy
+   753→ * has different bot-detection characteristics.
+   754→ *
+   755→ * Throws a `BotBlockedError` (with `code === "BOT_BLOCKED"`) if any strategy
+   756→ * reported a bot-block signature. Throws a generic Error otherwise.
+   757→ */
+   758→export async function fetchTranscriptWithRetry(
+   759→  videoId: string
+   760→): Promise<TranscriptSegment[]> {
+   761→  const cached = transcriptCache.get(videoId);
+   762→  if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
+   763→    return cached.segments;
+   764→  }
+   765→
+   766→  const trackStrategies: {
+   767→    name: string;
+   768→    fn: (id: string) => Promise<CaptionTrack[] | null>;
+   769→  }[] = [
+   770→    {
+   771→      name: "ANDROID player API",
+   772→      fn: fetchCaptionTracksViaAndroidPlayer,
+   773→    },
+   774→    {
+   775→      name: "Watch page scrape",
+   776→      fn: fetchCaptionTracksViaWatchPage,
+   777→    },
+   778→  ];
+   779→
+   780→  const directStrategies: {
+   781→    name: string;
+   782→    fn: (id: string) => Promise<TranscriptSegment[] | null>;
+   783→  }[] = [
+   784→    {
+   785→      name: "youtube-transcript library",
+   786→      fn: fetchTranscriptViaYoutubeTranscriptLib,
+   787→    },
+   788→    {
+   789→      name: "youtubei.js (Innertube)",
+   790→      fn: fetchTranscriptViaInnertube,
+   791→    },
+   792→  ];
+   793→
+   794→  // Returns true if the error message looks like YouTube bot-protection /
+   795→  // rate-limiting. Used both to flag the final error as BOT_BLOCKED and to
+   796→  // decide whether to use a longer backoff before the next strategy.
+   797→  function isBotBlockMessage(msg: string): boolean {
+   798→    return /sign in|bot|consent|429|rate.?limit|captcha|too many requests|unusual traffic/i.test(
+   799→      msg
+   800→    );
+   801→  }
+   802→
+   803→  let lastError: Error | null = null;
+   804→  let botBlockedSeen = false;
+   805→  let segments: TranscriptSegment[] | null = null;
+   806→
+   807→  for (const strategy of trackStrategies) {
+   808→    try {
+   809→      console.log(`[youtube] Trying ${strategy.name} for ${videoId}`);
+   810→      const tracks = await strategy.fn(videoId);
+   811→      if (!tracks || tracks.length === 0) {
+   812→        console.log(`[youtube] ✗ ${strategy.name} returned no tracks`);
+   813→        continue;
+   814→      }
+   815→      console.log(
+   816→        `[youtube] ✓ ${strategy.name} returned ${tracks.length} tracks`
+   817→      );
+   818→      segments = await fetchAndParseCaptionTracks(tracks);
+   819→      if (segments.length > 0) break;
+   820→    } catch (e) {
+   821→      const msg = (e as Error).message;
+   822→      console.log(`[youtube] ✗ ${strategy.name} failed: ${msg}`);
+   823→      const blocked = isBotBlockMessage(msg);
+   824→      if (blocked) {
+   825→        botBlockedSeen = true;
+   826→        lastError = e as Error;
+   827→      } else if (!botBlockedSeen) {
+   828→        lastError = e as Error;
+   829→      }
+   830→      // 429 = rate limit: give YouTube time to cool down before next attempt.
+   831→      // Bot-block / "Sign in" usually clears with a 1.5s pause. Other errors
+   832→      // (e.g. caption format unsupported) don't need any delay.
+   833→      const backoff = blocked ? 1500 : 400;
+   834→      await new Promise((r) => setTimeout(r, backoff));
+   835→    }
+   836→  }
+   837→
+   838→  if (!segments || segments.length === 0) {
+   839→    for (const strategy of directStrategies) {
+   840→      try {
+   841→        console.log(`[youtube] Trying ${strategy.name} for ${videoId}`);
+   842→        const result = await strategy.fn(videoId);
+   843→        if (!result || result.length === 0) {
+   844→          console.log(`[youtube] ✗ ${strategy.name} returned no segments`);
+   845→          continue;
+   846→        }
+   847→        console.log(
+   848→          `[youtube] ✓ ${strategy.name} returned ${result.length} segments`
+   849→        );
+   850→        segments = result;
+   851→        break;
+   852→      } catch (e) {
+   853→        const msg = (e as Error).message;
+   854→        console.log(`[youtube] ✗ ${strategy.name} failed: ${msg}`);
+   855→        const blocked = isBotBlockMessage(msg);
+   856→        if (blocked) {
+   857→          botBlockedSeen = true;
+   858→          lastError = e as Error;
+   859→        } else if (!botBlockedSeen) {
+   860→          lastError = e as Error;
+   861→        }
+   862→        const backoff = blocked ? 1500 : 400;
+   863→        await new Promise((r) => setTimeout(r, backoff));
+   864→      }
+   865→    }
+   866→  }
+   867→
+   868→  if (!segments || segments.length === 0) {
+   869→    if (botBlockedSeen) {
+   870→      // The manual-paste fallback is wired up in the UI (page.tsx shows a
+   871→      // "Paste transcript manually" panel when this BOT_BLOCKED code is
+   872→      // returned). The operator can also configure YOUTUBE_PROXY_URL to
+   873→      // route future requests through a different IP.
+   874→      const proxyNote = isYouTubeProxyConfigured()
+   875→        ? ""
+   876→        : " (Server operator: set YOUTUBE_PROXY_URL to route requests through a different IP.)";
+   877→      const friendlyMessage =
+   878→        "YouTube is rate-limiting this server's IP and asking us to sign in to " +
+   879→        "confirm we're not a bot. This is temporary and usually clears within a " +
+   880→        "few minutes. Please try again, try a different video, or use the " +
+   881→        "'Paste transcript manually' option below." + proxyNote;
+   882→      const err = new Error(friendlyMessage) as BotBlockedError;
+   883→      err.code = "BOT_BLOCKED";
+   884→      throw err;
+   885→    }
+   886→    const msg = lastError?.message || "";
+   887→    throw new Error(
+   888→      "This video has no captions or transcript available, or YouTube blocked the request. " +
+   889→        "Try a different video with English captions enabled, or try again in a few minutes." +
+   890→        (msg ? ` (Details: ${msg})` : "")
+   891→    );
+   892→  }
+   893→
+   894→  transcriptCache.set(videoId, {
+   895→    segments,
+   896→    fetchedAt: Date.now(),
+   897→  });
+   898→
+   899→  return segments;
+   900→}
+   901→
+   902→/**
+   903→ * Parse a user-pasted transcript. Accepts:
+   904→ *   - "MM:SS text" or "HH:MM:SS text" (one per line)
+   905→ *   - "[MM:SS] text"
+   906→ *   - "1:23:45 text"
+   907→ *   - Plain text (no timestamps) — each non-empty line becomes a segment
+   908→ *     with a sequential 5-second offset.
+   909→ */
+   910→export function parseUserTranscript(raw: string): {
+   911→  segments: TranscriptSegment[];
+   912→  hasTimestamps: boolean;
+   913→} {
+   914→  const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+   915→  if (lines.length === 0) return { segments: [], hasTimestamps: false };
+   916→
+   917→  const segments: TranscriptSegment[] = [];
+   918→  let lastStart = 0;
+   919→  let hasTimestamps = false;
+   920→  const tsRegex = /^\[?(\d{1,2}:\d{2}(?::\d{2})?)\]?\s*(.*)$/;
+   921→
+   922→  for (const line of lines) {
+   923→    const m = line.match(tsRegex);
+   924→    if (m) {
+   925→      const parts = m[1].split(":").map((p) => parseInt(p, 10));
+   926→      let sec: number;
+   927→      if (parts.length === 2) sec = parts[0] * 60 + parts[1];
+   928→      else if (parts.length === 3) sec = parts[0] * 3600 + parts[1] * 60 + parts[2];
+   929→      else sec = 0;
+   930→      lastStart = sec;
+   931→      hasTimestamps = true;
+   932→      if (m[2]) {
+   933→        segments.push({ start: sec, dur: 5, text: m[2].trim() });
+   934→      }
+   935→    } else {
+   936→      segments.push({ start: lastStart, dur: 5, text: line });
+   937→      lastStart += 5;
+   938→    }
+   939→  }
+   940→
+   941→  return { segments, hasTimestamps };
+   942→}
+   943→

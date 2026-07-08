@@ -1,0 +1,79 @@
+You are summarizing a YouTube video transcript into a structured mind map.
+
+VIDEO: "The only video you need to watch to understand AI Agentic Workflows | DeepSeek + OpenAI"
+(Transcript may be in Hindi/Hinglish auto-generated captions — translate to English if needed.)
+
+TRANSCRIPT:
+Welcome everyone. In this video we are going to build AI agentic workflows using DeepSeek and OpenAI together.
+So first let's understand what an agentic workflow actually means.
+In a normal LLM call you send a prompt, you get a response, end of story.
+But in an agentic workflow the model can decide which tool to call, observe the result, and then call another tool or return a final answer.
+This loop of plan, act, observe is what makes it agentic.
+
+Let's talk about DeepSeek first. DeepSeek R1 is a reasoning model that is open source and very cheap compared to OpenAI o1.
+The reason I like DeepSeek R1 for the reasoning step is that it actually shows its chain of thought before answering.
+So when you have a complex problem, DeepSeek R1 can break it down step by step.
+But DeepSeek is not great at tool calling. It sometimes hallucinates function arguments.
+That's where OpenAI comes in. OpenAI GPT-4o and the newer models have very reliable function calling.
+
+So the architecture I am going to show you is a hybrid one.
+We use DeepSeek R1 as the planner — it looks at the user query and decides what tools we need to call and in what order.
+Then we use OpenAI as the executor — it actually calls those tools with correct arguments.
+This gives us the best of both worlds: cheap reasoning from DeepSeek and reliable tool use from OpenAI.
+
+Let me show you the code now. I have a Next.js project set up with the Vercel AI SDK.
+We have a route called /api/agent that receives the user message.
+First it calls DeepSeek R1 with a system prompt that lists all available tools.
+DeepSeek returns a JSON plan — an array of steps, each step saying which tool to use and what input to give it.
+Then we loop over the plan and for each step we call OpenAI with the tool definition.
+OpenAI returns the tool call, we execute the tool, and we collect the result.
+
+The tools I have set up are web search using the Serper API, a code interpreter using a sandbox, and a calculator.
+For web search, we pass the query to Serper, get back the top 10 results, and we summarize them.
+For code interpreter, we run the code in a Node.js sandbox and return stdout.
+The calculator is just a simple expression evaluator.
+
+Let me show you a live demo. I'll ask the agent: "What is the current price of Bitcoin in rupees, and how much has it changed in the last 24 hours?"
+DeepSeek R1 plans this as two steps: first web search for Bitcoin price, then calculator for percentage change.
+Then OpenAI executes step one — calls the web search tool with query "Bitcoin price INR today".
+We get back the price. Then OpenAI calls the calculator with the price and the previous price to compute the change.
+Finally we combine the results and stream the answer back to the user.
+
+Now let's talk about cost. DeepSeek R1 is roughly 10x cheaper than OpenAI o1 for reasoning.
+For a typical agentic query with 3 tool calls, we spend about 0.002 dollars on DeepSeek and 0.01 dollars on OpenAI.
+So the total cost per query is around 1.2 cents, which is very reasonable.
+
+Some production tips. First, always stream your responses. The user should see the plan as it forms.
+Second, use retries on tool calls. Network calls fail, models hallucinate arguments, you need to retry.
+Third, have a fallback model. If DeepSeek is down, fall back to OpenAI o1-mini for the planning step.
+Fourth, log every step. You will need this for debugging and for cost analytics.
+
+Challenges with this architecture. The biggest one is that DeepSeek R1 is sometimes too slow — its reasoning can take 30 seconds or more.
+For chatbots this is fine, but for real-time apps you may need to skip reasoning and go straight to OpenAI tool calling.
+Another challenge is that the plan from DeepSeek is sometimes wrong. It might say to use the wrong tool or pass wrong arguments.
+In that case you need a validation step before executing the plan.
+
+Let me summarize what we covered today. We learned what agentic workflows are, why DeepSeek R1 is great for reasoning but bad for tools, why OpenAI is great for tools but expensive for reasoning, and how to combine them in a hybrid architecture. We also saw a live Next.js demo with web search, code interpreter, and calculator tools. And we discussed cost, latency, and production tips. If you want the full source code, the GitHub link is in the description. Thanks for watching and I'll see you in the next video.
+
+Produce a JSON mind-map structure with this exact shape:
+{
+  "root": "<short overall topic, 3-6 words, English>",
+  "branches": [
+    {
+      "label": "Branch Name (3-6 words, English)",
+      "children": [
+        "Leaf 1 (short phrase, max 8 words)",
+        "Leaf 2",
+        "Leaf 3"
+      ]
+    }
+  ]
+}
+
+Requirements:
+- 6-8 first-level branches (cover: what the video is about, key concepts, tools/tech used, architecture pattern, code/demo highlights, benefits, challenges/limitations, takeaways)
+- Each branch has 3-5 leaf children
+- All text in English (translate from Hindi if needed)
+- Each leaf is a short phrase (max 8 words)
+- Cover the ACTUAL content of the video, not generic AI concepts
+- Return ONLY the JSON object, no markdown code fences, no commentary.

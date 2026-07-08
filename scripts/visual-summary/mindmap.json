@@ -1,0 +1,84 @@
+{
+  "root": "AI Agentic Workflows",
+  "branches": [
+    {
+      "label": "Agentic Workflow Basics",
+      "children": [
+        "Plan, act, observe loop",
+        "Model chooses tools",
+        "Multiple tool calls possible",
+        "Beyond simple LLM calls"
+      ]
+    },
+    {
+      "label": "DeepSeek R1 Overview",
+      "children": [
+        "Open source reasoning model",
+        "Cost-effective alternative",
+        "Shows chain of thought",
+        "Breaks down complex problems",
+        "Poor tool calling reliability"
+      ]
+    },
+    {
+      "label": "OpenAI Capabilities",
+      "children": [
+        "Reliable function calling",
+        "GPT-4o and newer models",
+        "Precise tool execution",
+        "Handles arguments correctly"
+      ]
+    },
+    {
+      "label": "Hybrid Architecture",
+      "children": [
+        "DeepSeek as planner",
+        "OpenAI as executor",
+        "Best of both worlds",
+        "Reasoning + tool calling",
+        "Cost-effective design"
+      ]
+    },
+    {
+      "label": "Implementation Details",
+      "children": [
+        "Next.js with Vercel SDK",
+        "/api/agent endpoint",
+        "JSON plan generation",
+        "Tool execution loop",
+        "Streaming responses"
+      ]
+    },
+    {
+      "label": "Demo Tools",
+      "children": [
+        "Web search with Serper",
+        "Code interpreter sandbox",
+        "Expression calculator",
+        "Bitcoin price example",
+        "Percentage change calculation"
+      ]
+    },
+    {
+      "label": "Cost Analysis",
+      "children": [
+        "DeepSeek 10x cheaper",
+        "$0.002 per reasoning",
+        "$0.01 per tool call",
+        "$0.012 total per query",
+        "Cost-effective solution"
+      ]
+    },
+    {
+      "label": "Production Considerations",
+      "children": [
+        "Streaming responses",
+        "Retry mechanism",
+        "Fallback models",
+        "Detailed logging",
+        "Latency challenges",
+        "Plan validation needed"
+      ]
+    }
+  ]
+}

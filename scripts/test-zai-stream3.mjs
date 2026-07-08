@@ -1,9 +1,16 @@
-import ZAI from 'z-ai-web-dev-sdk';
-const zai = await ZAI.create();
+import { GoogleGenAI } from '@google/genai';
 
-const stream = await zai.chat.completions.create({
-  messages: [{ role: 'user', content: 'Count from 1 to 5' }],
-  stream: true,
+const apiKey = process.env.GEMINI_API_KEY;
+if (!apiKey) {
+  throw new Error(
+    'GEMINI_API_KEY is not set. Get a free key at https://aistudio.google.com/apikey and set it in your env.',
+  );
+}
+const client = new GoogleGenAI({ apiKey });
+
+const stream = await client.models.generateContentStream({
+  model: 'gemini-2.0-flash',
+  contents: [{ role: 'user', parts: [{ text: 'Count from 1 to 5' }] }],
 });
 
 let i = 0;

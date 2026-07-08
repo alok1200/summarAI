@@ -14,7 +14,7 @@ Before cutting a production build, verify:
       (`openssl rand -hex 32`)
 - [ ] `DATABASE_URL` points to a production DB (PostgreSQL recommended over
       SQLite for multi-instance deployments)
-- [ ] `ZAI_API_KEY` is set (or `/etc/.z-ai-config` is present on the server)
+- [ ] `GEMINI_API_KEY` is set (get one free at https://aistudio.google.com/apikey)
 - [ ] `YOUTUBE_PROXY_URL` is set IF you expect heavy YouTube usage from a
       single IP (otherwise users will hit the "paste transcript" fallback
       when YouTube rate-limits you)

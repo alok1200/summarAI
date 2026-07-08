@@ -1,20 +1,27 @@
-import ZAI from "z-ai-web-dev-sdk";
+import { GoogleGenAI } from "@google/genai";
 
 /**
  * Shared LLM helpers used by /api/chat, /api/youtube-summary, and
  * /api/youtube-interview.
  *
- * IMPORTANT — REAL STREAMING (fixes the 502 problem):
- * The previous version awaited the FULL completion before re-streaming the
- * text back to the client with a fake typing delay. That meant the proxy
- * between the user's browser and the dev server saw NO response bytes for
- * 60-90 seconds (the time it takes the LLM to generate a 15-question
- * interview), and the proxy returned 502 "Gateway Timeout" even though the
- * Next.js function eventually completed successfully.
+ * BACKEND: Google Gemini (via @google/genai SDK).
  *
- * The fix: pipe the Z.ai SDK's streaming response directly to the HTTP
- * response, so the first token reaches the browser within ~1 second and
- * the proxy connection stays alive throughout the generation.
+ * The public API of this module (function names, signatures, and the
+ * ChatMessage / VisionMessage interfaces) is intentionally preserved
+ * from the previous Z.AI-backed version, so the four API routes that
+ * import from here (chat, youtube-summary, youtube-interview,
+ * youtube-load) do not need to change.
+ *
+ * IMPORTANT — REAL STREAMING (fixes the 502 problem):
+ * chatCompleteStream() and visionCompleteStream() pipe Gemini's
+ * generateContentStream() chunks directly to the HTTP response, so the
+ * first token reaches the browser within ~1 second and the proxy
+ * connection stays alive throughout the generation.
+ *
+ * ENV VARS:
+ *   GEMINI_API_KEY   (required) — get one at https://aistudio.google.com/apikey
+ *   LLM_MODEL        (optional) — override the chat model (default: gemini-2.0-flash)
+ *   LLM_VISION_MODEL (optional) — override the vision model (default: gemini-2.0-flash)
  */
 
 export interface ChatMessage {
@@ -117,49 +124,49 @@ export async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
   throw lastErr;
 }
 
+// ---------------------------------------------------------------------------
+// Gemini client
+// ---------------------------------------------------------------------------
+
 /**
- * Resolve ZAI client configuration.
+ * Default Gemini models. Both text and vision default to gemini-2.0-flash
+ * because it is fast, cheap, multimodal (text + vision in the same model),
+ * and universally available on every Gemini API key.
  *
- * BYO-key behaviour:
- *   - If ZAI_API_KEY is set in the environment, we use it (plus optional
- *     ZAI_BASE_URL). This lets the user plug in their own Z.ai account when
- *     deploying elsewhere (Vercel / their own server / another cloud).
- *   - If ZAI_API_KEY is empty or unset, we fall back to ZAI.create() which
- *     reads the SDK's default .z-ai-config file (shipped with this env at
- *     /etc/.z-ai-config). That is what makes the app run "out of the box"
- *     with zero configuration.
- *
- * The SDK's constructor is marked `private` in the .d.ts (it wants you to go
- * through ZAI.create()), but the runtime JS doesn't enforce that — so we
- * cast to any to instantiate directly with our env-provided config.
+ * Override with the LLM_MODEL / LLM_VISION_MODEL env vars if you want to
+ * use a different model (e.g. gemini-2.5-pro for higher-quality output,
+ * gemini-2.0-flash-lite for cheaper runs).
  */
-interface ZaiConfig {
-  baseUrl: string;
-  apiKey: string;
-  chatId?: string;
-  userId?: string;
-  token?: string;
-}
+const DEFAULT_CHAT_MODEL = "gemini-2.0-flash";
+const DEFAULT_VISION_MODEL = "gemini-2.0-flash";
 
-const DEFAULT_ZAI_BASE_URL = "https://api.z.ai/v1";
+let cachedClient: GoogleGenAI | null = null;
 
-export async function getZai(): Promise<ZAI> {
-  const envKey = process.env.ZAI_API_KEY;
-  if (envKey && envKey.trim() !== "") {
-    const config: ZaiConfig = {
-      baseUrl: (process.env.ZAI_BASE_URL || DEFAULT_ZAI_BASE_URL).trim(),
-      apiKey: envKey.trim(),
-    };
-    // Bypass the `private constructor` TS hint — runtime allows it.
-    return new (ZAI as unknown as new (c: ZaiConfig) => ZAI)(config);
+/**
+ * Get a cached GoogleGenAI client. Requires GEMINI_API_KEY in the env.
+ *
+ * Throws a helpful, actionable error if the key is missing (rather than
+ * a cryptic SDK error) so the user knows exactly what to do.
+ */
+function getClient(): GoogleGenAI {
+  if (cachedClient) return cachedClient;
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey || apiKey.trim() === "") {
+    throw new Error(
+      "GEMINI_API_KEY is not set. Get a free key at https://aistudio.google.com/apikey " +
+        "and add it to your .env file as GEMINI_API_KEY=\"your-key-here\"."
+    );
   }
-  // Fallback: default /etc/.z-ai-config (the pre-configured env key).
-  return await ZAI.create();
+  cachedClient = new GoogleGenAI({ apiKey: apiKey.trim() });
+  return cachedClient;
 }
 
 /**
  * Resolve the chat model name. If LLM_MODEL is set in the environment, use it;
- * otherwise return undefined so the SDK picks its default production model.
+ * otherwise return undefined, and callers fall back to DEFAULT_CHAT_MODEL.
+ *
+ * (Preserved as `string | undefined` from the previous version so existing
+ * unit tests that expect undefined keep passing.)
  */
 export function getLLMModel(): string | undefined {
   const m = process.env.LLM_MODEL;
@@ -167,13 +174,121 @@ export function getLLMModel(): string | undefined {
 }
 
 /**
- * Resolve the vision model name. Defaults to "glm-4v-flash" if LLM_VISION_MODEL
- * is unset/empty (matches the previous hardcoded behaviour).
+ * Resolve the vision model name. Defaults to gemini-2.0-flash if
+ * LLM_VISION_MODEL is unset/empty (Gemini 2.0 Flash supports vision natively,
+ * so a separate vision model is not needed).
  */
 export function getLLMVisionModel(): string {
   const m = process.env.LLM_VISION_MODEL;
-  return m && m.trim() !== "" ? m.trim() : "glm-4v-flash";
+  return m && m.trim() !== "" ? m.trim() : DEFAULT_VISION_MODEL;
 }
+
+// ---------------------------------------------------------------------------
+// Message format conversion (OpenAI-style → Gemini-style)
+// ---------------------------------------------------------------------------
+
+/**
+ * Gemini uses `role: "user" | "model"` (not "assistant") and separates the
+ * system prompt into `config.systemInstruction` rather than the contents array.
+ *
+ * This function converts our internal ChatMessage[] into the shape Gemini's
+ * SDK expects, returning `{ contents, systemInstruction }`.
+ */
+function toGeminiContents(
+  messages: ChatMessage[]
+): {
+  contents: Array<{ role: "user" | "model"; parts: Array<{ text: string }> }>;
+  systemInstruction?: string;
+} {
+  const systemParts: string[] = [];
+  const contents: Array<{ role: "user" | "model"; parts: Array<{ text: string }> }> = [];
+  for (const m of messages) {
+    if (m.role === "system") {
+      systemParts.push(m.content);
+      continue;
+    }
+    contents.push({
+      role: m.role === "assistant" ? "model" : "user",
+      parts: [{ text: m.content }],
+    });
+  }
+  return {
+    contents,
+    systemInstruction: systemParts.length > 0 ? systemParts.join("\n\n") : undefined,
+  };
+}
+
+/**
+ * Parse a data URL (e.g. "data:image/png;base64,iVBOR...") into the
+ * mimeType + base64 data that Gemini's inlineData part expects.
+ *
+ * Returns null if the input isn't a recognisable data URL.
+ */
+function parseDataUrl(url: string): { mimeType: string; data: string } | null {
+  // Match: data:<mime>;base64,<data>  (without the /s flag so we don't need es2018+)
+  const match = /^data:([^;]+);base64,([\s\S]*)$/.exec(url);
+  if (!match) return null;
+  return { mimeType: match[1], data: match[2] };
+}
+
+/**
+ * Convert our VisionMessage[] (OpenAI-style multimodal format) into Gemini's
+ * `contents` shape. Image parts become `{ inlineData: { mimeType, data } }`.
+ *
+ * System messages are extracted into `systemInstruction` (same as the text
+ * path), since Gemini doesn't allow a system role inside `contents`.
+ */
+function toGeminiVisionContents(
+  messages: VisionMessage[]
+): {
+  contents: Array<{
+    role: "user" | "model";
+    parts: Array<{ text?: string; inlineData?: { mimeType: string; data: string } }>;
+  }>;
+  systemInstruction?: string;
+} {
+  const systemParts: string[] = [];
+  const contents: Array<{
+    role: "user" | "model";
+    parts: Array<{ text?: string; inlineData?: { mimeType: string; data: string } }>;
+  }> = [];
+  for (const m of messages) {
+    if (m.role === "system") {
+      if (typeof m.content === "string") systemParts.push(m.content);
+      continue;
+    }
+    const role: "user" | "model" = m.role === "assistant" ? "model" : "user";
+    if (typeof m.content === "string") {
+      contents.push({ role, parts: [{ text: m.content }] });
+      continue;
+    }
+    // Array form: convert each part to Gemini's Part shape.
+    const parts: Array<{ text?: string; inlineData?: { mimeType: string; data: string } }> = [];
+    for (const p of m.content) {
+      if (p.type === "text" && typeof p.text === "string") {
+        parts.push({ text: p.text });
+      } else if (p.type === "image_url" && p.image_url?.url) {
+        const parsed = parseDataUrl(p.image_url.url);
+        if (parsed) {
+          parts.push({ inlineData: parsed });
+        }
+      }
+    }
+    if (parts.length === 0) {
+      // Defensive: never send an empty parts array — Gemini rejects it.
+      parts.push({ text: "" });
+    }
+    contents.push({ role, parts });
+  }
+  return {
+    contents,
+    systemInstruction: systemParts.length > 0 ? systemParts.join("\n\n") : undefined,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Public API — non-streaming completions
+// ---------------------------------------------------------------------------
 
 /**
  * Send a plain-text chat completion (non-streaming) with retry on transient
@@ -188,21 +303,21 @@ export async function chatComplete(
   messages: ChatMessage[],
   options?: { maxTokens?: number }
 ): Promise<string> {
-  const zai = await getZai();
-  const params: Record<string, unknown> = {
-    messages,
-    thinking: { type: "disabled" },
-  };
-  const model = getLLMModel();
-  if (model) params.model = model;
-  if (options?.maxTokens) {
-    params.max_tokens = options.maxTokens;
-  }
-  const completion = await withRetry(() =>
-    zai.chat.completions.create(params as any)
+  const client = getClient();
+  const { contents, systemInstruction } = toGeminiContents(messages);
+  const response = await withRetry(() =>
+    client.models.generateContent({
+      model: getLLMModel() ?? DEFAULT_CHAT_MODEL,
+      contents,
+      config: {
+        ...(systemInstruction ? { systemInstruction } : {}),
+        ...(options?.maxTokens ? { maxOutputTokens: options.maxTokens } : {}),
+      },
+    })
   );
+  const text = response.text;
   return (
-    completion?.choices?.[0]?.message?.content ??
+    text ??
     "Sorry, I couldn't generate a response. Please try again."
   );
 }
@@ -215,30 +330,34 @@ export async function visionComplete(
   messages: VisionMessage[],
   model: string = getLLMVisionModel()
 ): Promise<string> {
-  const zai = await getZai();
-  const completion = await withRetry(() =>
-    zai.chat.completions.createVision({
+  const client = getClient();
+  const { contents, systemInstruction } = toGeminiVisionContents(messages);
+  const response = await withRetry(() =>
+    client.models.generateContent({
       model,
-      messages,
-      thinking: { type: "disabled" },
-    } as any)
+      contents,
+      config: systemInstruction ? { systemInstruction } : {},
+    })
   );
+  const text = response.text;
   return (
-    completion?.choices?.[0]?.message?.content ??
+    text ??
     "Sorry, I couldn't analyze the attached image(s). Please try again."
   );
 }
 
+// ---------------------------------------------------------------------------
+// Public API — streaming completions
+// ---------------------------------------------------------------------------
+
 /**
  * Parse one SSE chunk (Uint8Array or string) and return any new content
- * deltas found in it. The Z.ai SDK yields raw SSE bytes when `stream: true`
- * is set; each line looks like `data: {"choices":[{"delta":{"content":"..."}}]}`
- * or `data: [DONE]`.
+ * deltas found in it.
  *
- * The parser is tolerant of partial chunks (a JSON object split across
- * multiple Uint8Array yields) by buffering incomplete lines.
- *
- * Exported so the streaming-parser logic can be unit-tested directly.
+ * NOTE: This class is no longer used by the streaming code paths below
+ * (the @google/genai SDK yields structured chunks with a `.text` property,
+ * not raw SSE bytes). It is kept for backwards compatibility with the
+ * existing unit tests and any future code that might want to parse SSE.
  */
 export class SSEParser {
   private buffer = "";
@@ -279,9 +398,6 @@ export class SSEParser {
    * (no trailing `\n`), the buffer holds a complete `data:` payload that
    * `feed()` would otherwise just re-buffer forever. We append a newline
    * so feed() treats the buffered content as a complete line and parses it.
-   *
-   * Without this fix, the final content delta of a stream can be silently
-   * dropped — caught by the SSEParser unit tests.
    */
   flush(): string[] {
     if (!this.buffer.trim()) return [];
@@ -306,36 +422,29 @@ export async function chatCompleteStream(
   messages: ChatMessage[],
   options?: { maxTokens?: number }
 ): Promise<ReadableStream<Uint8Array>> {
-  const zai = await getZai();
-  const params: Record<string, unknown> = {
-    messages,
-    stream: true,
-    thinking: { type: "disabled" },
-  };
-  const model = getLLMModel();
-  if (model) params.model = model;
-  if (options?.maxTokens) {
-    params.max_tokens = options.maxTokens;
-  }
+  const client = getClient();
+  const { contents, systemInstruction } = toGeminiContents(messages);
   const stream = await withRetry(() =>
-    zai.chat.completions.create(params as any)
+    client.models.generateContentStream({
+      model: getLLMModel() ?? DEFAULT_CHAT_MODEL,
+      contents,
+      config: {
+        ...(systemInstruction ? { systemInstruction } : {}),
+        ...(options?.maxTokens ? { maxOutputTokens: options.maxTokens } : {}),
+      },
+    })
   );
 
   const encoder = new TextEncoder();
-  const parser = new SSEParser();
 
   return new ReadableStream({
     async start(controller) {
       try {
         for await (const chunk of stream as any) {
-          const deltas = parser.feed(chunk as Uint8Array);
-          for (const d of deltas) {
-            controller.enqueue(encoder.encode(d));
+          const text = typeof chunk?.text === "string" ? chunk.text : "";
+          if (text.length > 0) {
+            controller.enqueue(encoder.encode(text));
           }
-        }
-        // Flush any trailing content
-        for (const d of parser.flush()) {
-          controller.enqueue(encoder.encode(d));
         }
       } catch (err) {
         // Mid-stream error — emit a notice and close. We can't retry here
@@ -354,36 +463,32 @@ export async function chatCompleteStream(
 
 /**
  * Streaming version of visionComplete — same pattern as chatCompleteStream
- * but for the vision endpoint.
+ * but for multimodal input (text + images).
  */
 export async function visionCompleteStream(
   messages: VisionMessage[],
   model: string = getLLMVisionModel()
 ): Promise<ReadableStream<Uint8Array>> {
-  const zai = await getZai();
+  const client = getClient();
+  const { contents, systemInstruction } = toGeminiVisionContents(messages);
   const stream = await withRetry(() =>
-    zai.chat.completions.createVision({
+    client.models.generateContentStream({
       model,
-      messages,
-      stream: true,
-      thinking: { type: "disabled" },
-    } as any)
+      contents,
+      config: systemInstruction ? { systemInstruction } : {},
+    })
   );
 
   const encoder = new TextEncoder();
-  const parser = new SSEParser();
 
   return new ReadableStream({
     async start(controller) {
       try {
         for await (const chunk of stream as any) {
-          const deltas = parser.feed(chunk as Uint8Array);
-          for (const d of deltas) {
-            controller.enqueue(encoder.encode(d));
+          const text = typeof chunk?.text === "string" ? chunk.text : "";
+          if (text.length > 0) {
+            controller.enqueue(encoder.encode(text));
           }
-        }
-        for (const d of parser.flush()) {
-          controller.enqueue(encoder.encode(d));
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : "Stream interrupted";

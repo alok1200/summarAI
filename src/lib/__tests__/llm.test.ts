@@ -132,8 +132,8 @@ describe("getLLMModel", () => {
   });
 
   it("returns the trimmed value when LLM_MODEL is set", () => {
-    process.env.LLM_MODEL = "  glm-4.6  ";
-    expect(getLLMModel()).toBe("glm-4.6");
+    process.env.LLM_MODEL = "  gemini-2.5-pro  ";
+    expect(getLLMModel()).toBe("gemini-2.5-pro");
   });
 });
 
@@ -147,18 +147,18 @@ describe("getLLMVisionModel", () => {
     else process.env.LLM_VISION_MODEL = original;
   });
 
-  it("defaults to 'glm-4v-flash' when LLM_VISION_MODEL is unset", () => {
-    expect(getLLMVisionModel()).toBe("glm-4v-flash");
+  it("defaults to 'gemini-2.0-flash' when LLM_VISION_MODEL is unset", () => {
+    expect(getLLMVisionModel()).toBe("gemini-2.0-flash");
   });
 
-  it("defaults to 'glm-4v-flash' when LLM_VISION_MODEL is empty", () => {
+  it("defaults to 'gemini-2.0-flash' when LLM_VISION_MODEL is empty", () => {
     process.env.LLM_VISION_MODEL = "";
-    expect(getLLMVisionModel()).toBe("glm-4v-flash");
+    expect(getLLMVisionModel()).toBe("gemini-2.0-flash");
   });
 
   it("returns the trimmed value when LLM_VISION_MODEL is set", () => {
-    process.env.LLM_VISION_MODEL = "  glm-4v  ";
-    expect(getLLMVisionModel()).toBe("glm-4v");
+    process.env.LLM_VISION_MODEL = "  gemini-2.5-pro  ";
+    expect(getLLMVisionModel()).toBe("gemini-2.5-pro");
   });
 });
 

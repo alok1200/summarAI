@@ -94,6 +94,12 @@ function validateEnv(): EnvIssue[] {
  *
  * Called from `instrumentation.ts` (Next.js startup hook). Should NEVER
  * be called per-request — it's a one-shot boot check.
+ *
+ * NOTE: We throw (rather than calling process.exit) because instrumentation
+ * hooks run in the Edge Runtime, which doesn't support process.exit. An
+ * unhandled throw from instrumentation causes the server to fail to start
+ * with a clear error in the logs — which is exactly the fail-fast behaviour
+ * we want.
  */
 export function assertEnvOrExit(): void {
   const issues = validateEnv();
@@ -110,16 +116,12 @@ export function assertEnvOrExit(): void {
       console.error(`[env]   • ${f.varName}: ${f.message}`);
     }
     console.error("\n[env] Refusing to start. Fix the above and restart.\n");
-    // In development, throw (so the dev server shows a clear error in the
-    // browser / terminal). In production, exit non-zero so the process
-    // manager (systemd / Docker / Vercel) restarts the container.
-    if (process.env.NODE_ENV === "production") {
-      process.exit(1);
-    } else {
-      throw new Error(
-        `FATAL: ${fatals.map((f) => f.varName).join(", ")} env var(s) missing or invalid. ` +
-          "See server logs above."
-      );
-    }
+    // Throw (don't process.exit) — instrumentation.ts runs in the Edge
+    // Runtime where process.exit is unavailable. An unhandled throw here
+    // causes the server to fail to boot in both dev and prod.
+    throw new Error(
+      `FATAL: ${fatals.map((f) => f.varName).join(", ")} env var(s) missing or invalid. ` +
+        "See server logs above."
+    );
   }
 }

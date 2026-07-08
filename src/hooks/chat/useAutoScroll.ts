@@ -75,14 +75,12 @@ export function useAutoScroll({
 
   // Scroll to bottom on dep change, but only if user was near bottom
   // (or if `force` is true).
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
     if (force || wasNearBottomRef.current) {
       el.scrollTop = el.scrollHeight;
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps);
 
   const scrollToBottom = useCallback(() => {

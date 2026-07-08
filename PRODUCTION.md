@@ -6,22 +6,57 @@ works locally.
 
 ---
 
+## 0. Production-readiness verification (run before every deploy)
+
+The project ships with a complete test + lint + build pipeline. Run all
+four checks locally before cutting a production build:
+
+```bash
+npx tsc --noEmit    # Type-check — MUST pass with 0 errors
+bun run lint        # ESLint — MUST pass with 0 errors (warnings OK)
+bun test            # Unit tests — MUST all pass (currently 179 tests)
+bun run build       # Production build — MUST succeed
+```
+
+All four are enforced as hard gates — if any fails, fix it before deploying.
+The build also runs `tsc` and `eslint` internally, so a successful build
+implies type-check + lint passed.
+
+---
+
 ## 1. Pre-deployment checklist
 
 Before cutting a production build, verify:
 
 - [ ] `SESSION_SECRET` is set to a 64-char random hex string
-      (`openssl rand -hex 32`)
+      (`openssl rand -hex 32`). If unset, the app boots but logs a warning
+      and sessions won't survive a server restart.
 - [ ] `DATABASE_URL` points to a production Postgres (Neon / Supabase / RDS
       / etc.). SQLite is fine for local dev but not multi-instance production.
-- [ ] `GEMINI_API_KEY` is set (get one free at https://aistudio.google.com/apikey)
+- [ ] `GEMINI_API_KEY` is set (get one free at https://aistudio.google.com/apikey).
+      The app refuses to start in production if this is missing (fail-fast).
 - [ ] `YOUTUBE_PROXY_URL` is set IF you expect heavy YouTube usage from a
       single IP (otherwise users will hit the "paste transcript" fallback
       when YouTube rate-limits you)
 - [ ] `NEXT_PUBLIC_APP_URL` is set to your public URL
-- [ ] Cron job for DB backups is configured (see §5 below)
+- [ ] Cron job for DB backups is configured (see §5 below — Neon has
+      built-in PITR so this may be optional)
 - [ ] Reverse proxy (Caddy / nginx) is configured to forward to port 3000
-      and to set `X-Forwarded-For` / `X-Real-IP` headers
+      and to set `X-Forwarded-For` / `X-Real-IP` headers (required for
+      IP-based rate limiting of anonymous requests)
+
+### Startup-time env validation
+
+The app validates critical env vars ONCE at boot (via `instrumentation.ts`
++ `src/lib/env.ts`). In production:
+- Missing `DATABASE_URL` or `GEMINI_API_KEY` → `process.exit(1)` with a
+  clear error in the logs. The container/process manager restarts the app,
+  but it will keep exiting until you fix the env.
+- Missing `SESSION_SECRET` → warning logged, app boots, but sessions are
+  per-process (users get logged out on every restart).
+
+In development, the same checks throw immediately so you see the error
+in the terminal/browser instead of a silent 500 later.
 
 ---
 

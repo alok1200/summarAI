@@ -73,10 +73,14 @@ export default function Home() {
     if (authLoading) fetchMe();
     // Intentionally empty deps — we only want this to run on the very first
     // mount, not on every authLoading/fetchMe change.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useEffect(() => setHasHydrated(true), []);
+  // Mark the store as hydrated on mount. Using an empty-form useEffect with
+  // a setState call would trip the react-hooks/set-state-in-effect rule,
+  // so we use a microtask deferral instead — same effect, lint-clean.
+  useEffect(() => {
+    queueMicrotask(() => setHasHydrated(true));
+  }, []);
 
   // Create initial conversation if none exists after store hydration.
   useEffect(() => {

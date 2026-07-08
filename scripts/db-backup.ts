@@ -51,10 +51,24 @@ function resolveDbPath(): string {
   // Prisma SQLite URL format: "file:<path>"
   const m = url.match(/^file:(.+)$/);
   if (!m) {
-    throw new Error(
-      `DATABASE_URL must be a SQLite file: URL (got "${url}"). ` +
-        `For Postgres/MySQL, use the database's own backup tooling (pg_dump / mysqldump).`
+    // Non-SQLite database (Postgres / MySQL / etc.) — this script is
+    // SQLite-only (uses bun:sqlite + VACUUM INTO). Exit gracefully with
+    // actionable guidance instead of throwing a stack trace.
+    const provider =
+      url.startsWith("postgresql://") || url.startsWith("postgres://")
+        ? "Postgres"
+        : url.startsWith("mysql://")
+        ? "MySQL"
+        : "the configured database";
+    console.error(
+      `[db-backup] Skipping: DATABASE_URL is not a SQLite file: URL (${provider} detected).\n` +
+        `             This script only supports SQLite. For ${provider}, use the database's\n` +
+        `             native backup tooling instead:\n` +
+        `               - Postgres : pg_dump "$DATABASE_URL" -F c -f backup.dump\n` +
+        `               - Neon      : use Neon's built-in branch/restore UI at https://neon.tech\n` +
+        `               - MySQL     : mysqldump\n`
     );
+    process.exit(0);
   }
   return m[1];
 }

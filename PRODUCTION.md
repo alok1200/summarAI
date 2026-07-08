@@ -12,8 +12,8 @@ Before cutting a production build, verify:
 
 - [ ] `SESSION_SECRET` is set to a 64-char random hex string
       (`openssl rand -hex 32`)
-- [ ] `DATABASE_URL` points to a production DB (PostgreSQL recommended over
-      SQLite for multi-instance deployments)
+- [ ] `DATABASE_URL` points to a production Postgres (Neon / Supabase / RDS
+      / etc.). SQLite is fine for local dev but not multi-instance production.
 - [ ] `GEMINI_API_KEY` is set (get one free at https://aistudio.google.com/apikey)
 - [ ] `YOUTUBE_PROXY_URL` is set IF you expect heavy YouTube usage from a
       single IP (otherwise users will hit the "paste transcript" fallback

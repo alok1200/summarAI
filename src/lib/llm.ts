@@ -1,4 +1,6 @@
 import { GoogleGenAI } from "@google/genai";
+import OpenAI from "openai";
+import ZAISDK from "z-ai-web-dev-sdk";
 
 /**
  * Shared LLM helpers used by /api/chat, /api/youtube-summary, and
@@ -161,6 +163,129 @@ function getClient(): GoogleGenAI {
   return cachedClient;
 }
 
+// ---------------------------------------------------------------------------
+// DeepSeek fallback (OpenAI-compatible API)
+// ---------------------------------------------------------------------------
+//
+// Real Gemini API keys start with "AIza". If the GEMINI_API_KEY in the env
+// does NOT start with "AIza" (e.g. it's a DeepSeek key with format
+// "hex.alphanumeric"), we transparently route chat/vision calls through
+// DeepSeek's OpenAI-compatible API at https://api.deepseek.com/v1 instead.
+//
+// This lets users drop a DeepSeek key into GEMINI_API_KEY and still have a
+// working app, even though the variable name says "GEMINI". The DEEPSEEK_API_KEY
+// and DEEPSEEK_BASE_URL env vars are also recognised as explicit overrides.
+//
+// All DeepSeek calls use the `deepseek-chat` model by default (override with
+// LLM_MODEL). Vision input is silently downgraded to text-only on DeepSeek
+// (the image parts are dropped with a warning log).
+
+/**
+ * Returns true if the configured GEMINI_API_KEY looks like a real Gemini key
+ * (starts with "AIza" and is at least 30 chars). Returns false if it's missing
+ * or has a different format (likely a DeepSeek key).
+ */
+function isGeminiKeyConfigured(): boolean {
+  const k = process.env.GEMINI_API_KEY?.trim() ?? "";
+  return k.startsWith("AIza") && k.length >= 30;
+}
+
+/**
+ * Returns true if any DeepSeek-compatible key is configured — either via
+ * DEEPSEEK_API_KEY, or via a GEMINI_API_KEY that doesn't look like a real
+ * Gemini key (so we assume it's a DeepSeek key).
+ */
+function isDeepSeekKeyConfigured(): boolean {
+  const explicit = process.env.DEEPSEEK_API_KEY?.trim() ?? "";
+  if (explicit.length > 0) return true;
+  const gemini = process.env.GEMINI_API_KEY?.trim() ?? "";
+  // Non-empty GEMINI_API_KEY that isn't a real Gemini key → treat as DeepSeek
+  return gemini.length > 0 && !isGeminiKeyConfigured();
+}
+
+/**
+ * Returns true if the DeepSeek key (explicit OR falling back from GEMINI_API_KEY)
+ * has actually been verified to work. We start by assuming it works, then flip
+ * this to false on the first 401 from DeepSeek's API so subsequent requests
+ * skip straight to the Z.ai GLM fallback.
+ */
+let deepSeekVerifiedWorking: boolean | null = null;
+
+let cachedDeepSeekClient: OpenAI | null = null;
+
+/**
+ * Get a cached OpenAI SDK client pointed at DeepSeek's API. Uses
+ * DEEPSEEK_API_KEY if set, otherwise falls back to GEMINI_API_KEY (treating
+ * it as a DeepSeek key when it doesn't start with "AIza").
+ */
+function getDeepSeekClient(): OpenAI {
+  if (cachedDeepSeekClient) return cachedDeepSeekClient;
+  const explicit = process.env.DEEPSEEK_API_KEY?.trim() ?? "";
+  const fallback = process.env.GEMINI_API_KEY?.trim() ?? "";
+  const apiKey = explicit || fallback;
+  if (!apiKey) {
+    throw new Error(
+      "No LLM API key configured. Set either GEMINI_API_KEY (real Gemini key " +
+        "starting with 'AIza') or DEEPSEEK_API_KEY in your .env file."
+    );
+  }
+  cachedDeepSeekClient = new OpenAI({
+    apiKey,
+    baseURL:
+      process.env.DEEPSEEK_BASE_URL?.trim() || "https://api.deepseek.com/v1",
+  });
+  return cachedDeepSeekClient;
+}
+
+// ---------------------------------------------------------------------------
+// Z.ai GLM fallback (works out-of-the-box in this environment via the
+// pre-installed /etc/.z-ai-config — no env vars needed).
+// ---------------------------------------------------------------------------
+//
+// If both Gemini and DeepSeek are unavailable (missing/invalid keys), we fall
+// back to Z.ai's GLM-4 model via the z-ai-web-dev-sdk package. The SDK reads
+// its config from /etc/.z-ai-config (pre-provisioned in this sandbox).
+
+let cachedZaiClient: any = null;
+async function getZaiClient(): Promise<any> {
+  if (cachedZaiClient) return cachedZaiClient;
+  // ZAISDK.create() reads /etc/.z-ai-config (or ./.z-ai-config) and returns
+  // a client whose `.chat.completions.create()` API is OpenAI-compatible.
+  cachedZaiClient = await (ZAISDK as any).create();
+  return cachedZaiClient;
+}
+
+/**
+ * Decide which provider to use for THIS process. The provider is chosen
+ * dynamically per-request: we try Gemini first (if a real Gemini key is set),
+ * then DeepSeek (if a DeepSeek key is set AND hasn't failed authentication),
+ * then fall back to Z.ai GLM (always available in this sandbox).
+ *
+ * The DeepSeek "verifiedWorking" flag is set to false on the first 401 from
+ * DeepSeek, so subsequent requests skip the DeepSeek attempt entirely.
+ */
+async function getProvider(): Promise<"gemini" | "deepseek" | "zai"> {
+  if (isGeminiKeyConfigured()) return "gemini";
+  if (isDeepSeekKeyConfigured() && deepSeekVerifiedWorking !== false) {
+    return "deepseek";
+  }
+  return "zai";
+}
+
+/**
+ * Convert our internal ChatMessage[] into the OpenAI-style messages array
+ * that DeepSeek's API expects. System messages are passed through as-is
+ * (DeepSeek supports a system role, unlike Gemini).
+ */
+function toOpenAIMessages(
+  messages: ChatMessage[]
+): Array<{ role: "system" | "user" | "assistant"; content: string }> {
+  return messages.map((m) => ({
+    role: m.role,
+    content: m.content,
+  }));
+}
+
 /**
  * Resolve the chat model name. If LLM_MODEL is set in the environment, use it;
  * otherwise return undefined, and callers fall back to DEFAULT_CHAT_MODEL.
@@ -303,6 +428,52 @@ export async function chatComplete(
   messages: ChatMessage[],
   options?: { maxTokens?: number }
 ): Promise<string> {
+  const provider = await getProvider();
+
+  // Z.ai GLM branch — final fallback, always available in this sandbox
+  if (provider === "zai") {
+    const zai = await getZaiClient();
+    const completion = await withRetry(() =>
+      zai.chat.completions.create({
+        messages: toOpenAIMessages(messages),
+        ...(options?.maxTokens ? { max_tokens: options.maxTokens } : {}),
+      })
+    );
+    return (
+      completion?.choices?.[0]?.message?.content ??
+      "Sorry, I couldn't generate a response. Please try again."
+    );
+  }
+
+  // DeepSeek branch — used when GEMINI_API_KEY doesn't look like a real
+  // Gemini key (so we treat it as a DeepSeek key instead).
+  if (provider === "deepseek") {
+    try {
+      const ds = getDeepSeekClient();
+      const completion = await withRetry(() =>
+        ds.chat.completions.create({
+          model: getLLMModel() ?? "deepseek-chat",
+          messages: toOpenAIMessages(messages),
+          ...(options?.maxTokens ? { max_tokens: options.maxTokens } : {}),
+        })
+      );
+      deepSeekVerifiedWorking = true;
+      return (
+        completion.choices?.[0]?.message?.content ??
+        "Sorry, I couldn't generate a response. Please try again."
+      );
+    } catch (err: any) {
+      if (err?.status === 401 || /401|authentication/i.test(err?.message ?? "")) {
+        console.warn("[llm] DeepSeek key rejected (401). Marking DeepSeek as broken; falling back to Z.ai GLM for this and future requests.");
+        deepSeekVerifiedWorking = false;
+        // Fall through to Z.ai by re-cursing once (provider will now be "zai")
+        return chatComplete(messages, options);
+      }
+      throw err;
+    }
+  }
+
+  // Gemini branch (default)
   const client = getClient();
   const { contents, systemInstruction } = toGeminiContents(messages);
   const response = await withRetry(() =>
@@ -330,6 +501,92 @@ export async function visionComplete(
   messages: VisionMessage[],
   model: string = getLLMVisionModel()
 ): Promise<string> {
+  const provider = await getProvider();
+
+  // Z.ai GLM branch — Z.ai supports vision via z-ai-web-dev-sdk's createVision
+  if (provider === "zai") {
+    const zai = await getZaiClient();
+    // Convert our VisionMessage[] → Z.ai vision format
+    const zaiMessages = messages.map((m) => {
+      if (typeof m.content === "string") {
+        return { role: m.role, content: m.content };
+      }
+      // Multimodal: extract text + image parts
+      const content = m.content.map((p) => {
+        if (p.type === "text" && typeof p.text === "string") {
+          return { type: "text", text: p.text };
+        }
+        if (p.type === "image_url" && p.image_url?.url) {
+          return { type: "image_url", image_url: { url: p.image_url.url } };
+        }
+        return null;
+      }).filter(Boolean);
+      return { role: m.role, content };
+    });
+    try {
+      const completion = await withRetry(() =>
+        zai.chat.completions.createVision({ messages: zaiMessages })
+      );
+      return (
+        completion?.choices?.[0]?.message?.content ??
+        "Sorry, I couldn't analyze the attached image(s). Please try again."
+      );
+    } catch (err: any) {
+      // If vision isn't supported by the deployed Z.ai backend, downgrade to text-only
+      console.warn("[llm/zai] vision failed, downgrading to text-only:", err?.message);
+      const textOnly: ChatMessage[] = messages.map((m) => {
+        if (typeof m.content === "string") return { role: m.role, content: m.content };
+        const text = m.content
+          .filter((p) => p.type === "text" && typeof p.text === "string")
+          .map((p) => p.text!)
+          .join("\n");
+        return { role: m.role, content: text || "(no text provided)" };
+      });
+      const completion = await withRetry(() =>
+        zai.chat.completions.create({ messages: toOpenAIMessages(textOnly) })
+      );
+      return (
+        completion?.choices?.[0]?.message?.content ??
+        "Sorry, I couldn't analyze the attached image(s). Please try again."
+      );
+    }
+  }
+
+  // DeepSeek branch — DeepSeek doesn't support vision, so we silently
+  // downgrade to text-only by extracting just the text parts.
+  if (provider === "deepseek") {
+    try {
+      const ds = getDeepSeekClient();
+      const textOnly: ChatMessage[] = messages.map((m) => {
+        if (typeof m.content === "string") return { role: m.role, content: m.content };
+        const text = m.content
+          .filter((p) => p.type === "text" && typeof p.text === "string")
+          .map((p) => p.text!)
+          .join("\n");
+        return { role: m.role, content: text || "(no text provided)" };
+      });
+      console.warn("[llm] Vision request downgraded to text-only on DeepSeek");
+      const completion = await withRetry(() =>
+        ds.chat.completions.create({
+          model: getLLMModel() ?? "deepseek-chat",
+          messages: toOpenAIMessages(textOnly),
+        })
+      );
+      deepSeekVerifiedWorking = true;
+      return (
+        completion.choices?.[0]?.message?.content ??
+        "Sorry, I couldn't analyze the attached image(s). Please try again."
+      );
+    } catch (err: any) {
+      if (err?.status === 401 || /401|authentication/i.test(err?.message ?? "")) {
+        deepSeekVerifiedWorking = false;
+        return visionComplete(messages, model);
+      }
+      throw err;
+    }
+  }
+
+  // Gemini branch (default — full multimodal)
   const client = getClient();
   const { contents, systemInstruction } = toGeminiVisionContents(messages);
   const response = await withRetry(() =>
@@ -422,6 +679,136 @@ export async function chatCompleteStream(
   messages: ChatMessage[],
   options?: { maxTokens?: number }
 ): Promise<ReadableStream<Uint8Array>> {
+  const encoder = new TextEncoder();
+  const provider = await getProvider();
+
+  // Z.ai GLM branch — final fallback, always available in this sandbox
+  if (provider === "zai") {
+    const zai = await getZaiClient();
+    // The Z.ai SDK's `stream: true` returns an async iterator of raw SSE
+    // bytes (Uint8Array), NOT parsed JSON chunks. We need to buffer the
+    // bytes, split on newlines, and parse each `data: {...}` line.
+    const stream = await withRetry(() =>
+      zai.chat.completions.create({
+        messages: toOpenAIMessages(messages),
+        stream: true,
+        ...(options?.maxTokens ? { max_tokens: options.maxTokens } : {}),
+      })
+    );
+    return new ReadableStream({
+      async start(controller) {
+        const decoder = new TextDecoder();
+        let sseBuffer = "";
+        try {
+          for await (const rawChunk of stream as any) {
+            // rawChunk can be a Uint8Array (SSE bytes) OR a parsed object
+            // (some Z.ai SDK versions yield objects). Handle both.
+            let chunkStr: string;
+            if (rawChunk instanceof Uint8Array) {
+              chunkStr = decoder.decode(rawChunk, { stream: true });
+            } else if (typeof rawChunk === "string") {
+              chunkStr = rawChunk;
+            } else if (rawChunk?.choices?.[0]?.delta?.content) {
+              // Already-parsed object form
+              controller.enqueue(
+                encoder.encode(rawChunk.choices[0].delta.content)
+              );
+              continue;
+            } else {
+              continue;
+            }
+            sseBuffer += chunkStr;
+            // Process complete SSE lines (terminated by \n)
+            const lines = sseBuffer.split("\n");
+            sseBuffer = lines.pop() ?? ""; // keep the last partial line
+            for (const line of lines) {
+              const trimmed = line.trim();
+              if (!trimmed.startsWith("data:")) continue;
+              const payload = trimmed.slice(5).trim();
+              if (!payload || payload === "[DONE]") continue;
+              try {
+                const json = JSON.parse(payload);
+                const delta = json?.choices?.[0]?.delta?.content;
+                if (typeof delta === "string" && delta.length > 0) {
+                  controller.enqueue(encoder.encode(delta));
+                }
+              } catch {
+                // Partial JSON across chunks — ignore, will be completed next iteration
+              }
+            }
+          }
+          // Flush any remaining buffer
+          if (sseBuffer.trim().startsWith("data:")) {
+            const payload = sseBuffer.trim().slice(5).trim();
+            if (payload && payload !== "[DONE]") {
+              try {
+                const json = JSON.parse(payload);
+                const delta = json?.choices?.[0]?.delta?.content;
+                if (typeof delta === "string" && delta.length > 0) {
+                  controller.enqueue(encoder.encode(delta));
+                }
+              } catch {
+                /* ignore final partial */
+              }
+            }
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : "Stream interrupted";
+          console.error("[llm/zai] mid-stream error:", msg);
+          controller.enqueue(
+            encoder.encode(`\n\n\u26a0\ufe0f _Stream interrupted: ${msg}_`)
+          );
+        } finally {
+          controller.close();
+        }
+      },
+    });
+  }
+
+  // DeepSeek branch — use the OpenAI SDK's stream: true and pipe deltas.
+  if (provider === "deepseek") {
+    try {
+      const ds = getDeepSeekClient();
+      const stream = await withRetry(() =>
+        ds.chat.completions.create({
+          model: getLLMModel() ?? "deepseek-chat",
+          messages: toOpenAIMessages(messages),
+          stream: true,
+          ...(options?.maxTokens ? { max_tokens: options.maxTokens } : {}),
+        })
+      );
+      deepSeekVerifiedWorking = true;
+      return new ReadableStream({
+        async start(controller) {
+          try {
+            for await (const chunk of stream as any) {
+              const delta = chunk?.choices?.[0]?.delta?.content;
+              if (typeof delta === "string" && delta.length > 0) {
+                controller.enqueue(encoder.encode(delta));
+              }
+            }
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : "Stream interrupted";
+            console.error("[llm/deepseek] mid-stream error:", msg);
+            controller.enqueue(
+              encoder.encode(`\n\n\u26a0\ufe0f _Stream interrupted: ${msg}_`)
+            );
+          } finally {
+            controller.close();
+          }
+        },
+      });
+    } catch (err: any) {
+      if (err?.status === 401 || /401|authentication/i.test(err?.message ?? "")) {
+        console.warn("[llm] DeepSeek key rejected (401) on stream init. Falling back to Z.ai GLM.");
+        deepSeekVerifiedWorking = false;
+        return chatCompleteStream(messages, options);
+      }
+      throw err;
+    }
+  }
+
+  // Gemini branch (default)
   const client = getClient();
   const { contents, systemInstruction } = toGeminiContents(messages);
   const stream = await withRetry(() =>
@@ -434,8 +821,6 @@ export async function chatCompleteStream(
       },
     })
   );
-
-  const encoder = new TextEncoder();
 
   return new ReadableStream({
     async start(controller) {
@@ -452,7 +837,7 @@ export async function chatCompleteStream(
         const msg = err instanceof Error ? err.message : "Stream interrupted";
         console.error("[llm] mid-stream error:", msg);
         controller.enqueue(
-          encoder.encode(`\n\n⚠️ _Stream interrupted: ${msg}_`)
+          encoder.encode(`\n\n\u26a0\ufe0f _Stream interrupted: ${msg}_`)
         );
       } finally {
         controller.close();
@@ -469,6 +854,130 @@ export async function visionCompleteStream(
   messages: VisionMessage[],
   model: string = getLLMVisionModel()
 ): Promise<ReadableStream<Uint8Array>> {
+  const encoder = new TextEncoder();
+  const provider = await getProvider();
+
+  // Z.ai GLM branch — downgrade to text-only streaming (vision-streaming
+  // isn't supported by the deployed Z.ai backend in this sandbox).
+  if (provider === "zai") {
+    const zai = await getZaiClient();
+    const textOnly: ChatMessage[] = messages.map((m) => {
+      if (typeof m.content === "string") return { role: m.role, content: m.content };
+      const text = m.content
+        .filter((p) => p.type === "text" && typeof p.text === "string")
+        .map((p) => p.text!)
+        .join("\n");
+      return { role: m.role, content: text || "(no text provided)" };
+    });
+    console.warn("[llm/zai] Vision stream downgraded to text-only");
+    const stream = await withRetry(() =>
+      zai.chat.completions.create({
+        messages: toOpenAIMessages(textOnly),
+        stream: true,
+      })
+    );
+    return new ReadableStream({
+      async start(controller) {
+        const decoder = new TextDecoder();
+        let sseBuffer = "";
+        try {
+          for await (const rawChunk of stream as any) {
+            let chunkStr: string;
+            if (rawChunk instanceof Uint8Array) {
+              chunkStr = decoder.decode(rawChunk, { stream: true });
+            } else if (typeof rawChunk === "string") {
+              chunkStr = rawChunk;
+            } else if (rawChunk?.choices?.[0]?.delta?.content) {
+              controller.enqueue(
+                encoder.encode(rawChunk.choices[0].delta.content)
+              );
+              continue;
+            } else {
+              continue;
+            }
+            sseBuffer += chunkStr;
+            const lines = sseBuffer.split("\n");
+            sseBuffer = lines.pop() ?? "";
+            for (const line of lines) {
+              const trimmed = line.trim();
+              if (!trimmed.startsWith("data:")) continue;
+              const payload = trimmed.slice(5).trim();
+              if (!payload || payload === "[DONE]") continue;
+              try {
+                const json = JSON.parse(payload);
+                const delta = json?.choices?.[0]?.delta?.content;
+                if (typeof delta === "string" && delta.length > 0) {
+                  controller.enqueue(encoder.encode(delta));
+                }
+              } catch {
+                /* partial JSON */
+              }
+            }
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : "Stream interrupted";
+          console.error("[llm/zai vision] mid-stream error:", msg);
+          controller.enqueue(
+            encoder.encode(`\n\n\u26a0\ufe0f _Stream interrupted: ${msg}_`)
+          );
+        } finally {
+          controller.close();
+        }
+      },
+    });
+  }
+
+  // DeepSeek branch — downgrade to text-only (DeepSeek doesn't support vision).
+  if (provider === "deepseek") {
+    try {
+      const ds = getDeepSeekClient();
+      const textOnly: ChatMessage[] = messages.map((m) => {
+        if (typeof m.content === "string") return { role: m.role, content: m.content };
+        const text = m.content
+          .filter((p) => p.type === "text" && typeof p.text === "string")
+          .map((p) => p.text!)
+          .join("\n");
+        return { role: m.role, content: text || "(no text provided)" };
+      });
+      console.warn("[llm] Vision stream downgraded to text-only on DeepSeek");
+      const stream = await withRetry(() =>
+        ds.chat.completions.create({
+          model: getLLMModel() ?? "deepseek-chat",
+          messages: toOpenAIMessages(textOnly),
+          stream: true,
+        })
+      );
+      deepSeekVerifiedWorking = true;
+      return new ReadableStream({
+        async start(controller) {
+          try {
+            for await (const chunk of stream as any) {
+              const delta = chunk?.choices?.[0]?.delta?.content;
+              if (typeof delta === "string" && delta.length > 0) {
+                controller.enqueue(encoder.encode(delta));
+              }
+            }
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : "Stream interrupted";
+            console.error("[llm/deepseek vision] mid-stream error:", msg);
+            controller.enqueue(
+              encoder.encode(`\n\n\u26a0\ufe0f _Stream interrupted: ${msg}_`)
+            );
+          } finally {
+            controller.close();
+          }
+        },
+      });
+    } catch (err: any) {
+      if (err?.status === 401 || /401|authentication/i.test(err?.message ?? "")) {
+        deepSeekVerifiedWorking = false;
+        return visionCompleteStream(messages, model);
+      }
+      throw err;
+    }
+  }
+
+  // Gemini branch (default — full multimodal)
   const client = getClient();
   const { contents, systemInstruction } = toGeminiVisionContents(messages);
   const stream = await withRetry(() =>
@@ -478,8 +987,6 @@ export async function visionCompleteStream(
       config: systemInstruction ? { systemInstruction } : {},
     })
   );
-
-  const encoder = new TextEncoder();
 
   return new ReadableStream({
     async start(controller) {
@@ -494,7 +1001,7 @@ export async function visionCompleteStream(
         const msg = err instanceof Error ? err.message : "Stream interrupted";
         console.error("[llm vision] mid-stream error:", msg);
         controller.enqueue(
-          encoder.encode(`\n\n⚠️ _Stream interrupted: ${msg}_`)
+          encoder.encode(`\n\n\u26a0\ufe0f _Stream interrupted: ${msg}_`)
         );
       } finally {
         controller.close();

@@ -6,7 +6,7 @@
 # Usage: nohup bash scripts/keepalive-dev.sh > dev.log 2>&1 &
 
 set -u
-cd /home/z/my-project
+cd "$(dirname "$0")/.."
 PORT=3000
 HEALTH_URL="http://localhost:${PORT}/api/health"
 MAX_SILENT_FAILURES=3   # restart after 3 consecutive health-check failures

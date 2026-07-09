@@ -1,6 +1,6 @@
 #!/bin/bash
 set -e
-cd /home/z/my-project
+cd "$(dirname "$0")/.."
 
 pkill -9 -f "next dev" 2>/dev/null || true
 pkill -9 -f "next-server" 2>/dev/null || true
@@ -26,6 +26,7 @@ curl -s -o /dev/null -w "Login HTTP: %{http_code}\n" http://localhost:3000/
 # Take screenshots using puppeteer-core + the chrome that's already running
 cat > /tmp/snap.js << 'JSEOF'
 const puppeteer = require('puppeteer-core');
+const path = require('path');
 (async () => {
   // Find a chrome instance to connect to — try CDP on common ports
   const browser = await puppeteer.connect({
@@ -42,7 +43,7 @@ const puppeteer = require('puppeteer-core');
   await page.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: 'dark' }]);
   await page.goto('http://localhost:3000/', { waitUntil: 'networkidle2', timeout: 30000 });
   await new Promise(r => setTimeout(r, 2000));
-  await page.screenshot({ path: '/home/z/my-project/scripts/new-ui-login.png' });
+  await page.screenshot({ path: path.join(process.cwd(), 'scripts', 'new-ui-login.png') });
   console.log('✓ Login screenshot saved');
 
   // Try to login
@@ -50,7 +51,7 @@ const puppeteer = require('puppeteer-core');
     await page.type('input[type="email"]', 'uitest@example.com');
     await page.click('button:has-text("Continue with Email")');
     await new Promise(r => setTimeout(r, 3000));
-    await page.screenshot({ path: '/home/z/my-project/scripts/new-ui-empty.png' });
+    await page.screenshot({ path: path.join(process.cwd(), 'scripts', 'new-ui-empty.png') });
     console.log('✓ Empty state screenshot saved');
   } catch (e) {
     console.log('Login failed:', e.message);
@@ -61,7 +62,7 @@ const puppeteer = require('puppeteer-core');
 })().catch(e => { console.error(e); process.exit(1); });
 JSEOF
 
-NODE_PATH=/home/z/my-project/node_modules node /tmp/snap.js 2>&1 | tail -20
+NODE_PATH="$PWD/node_modules" node /tmp/snap.js 2>&1 | tail -20
 
 # Cleanup
 kill -9 $DEV_PID 2>/dev/null || true

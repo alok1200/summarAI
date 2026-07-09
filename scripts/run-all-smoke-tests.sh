@@ -3,7 +3,7 @@
 # duration of the test, then gets cleaned up. This is the only reliable way
 # to test in this sandbox (which kills background processes aggressively).
 set -u
-cd /home/z/my-project
+cd "$(dirname "$0")/.."
 
 PORT=3000
 

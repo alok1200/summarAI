@@ -1,9 +1,11 @@
 """Take screenshot of chat with YouTube URL typed in input."""
 import asyncio
+import os
 import sys
 from playwright.async_api import async_playwright
 
 async def main():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
     async with async_playwright() as p:
         browser = await p.chromium.launch(args=['--no-sandbox'])
         ctx = await browser.new_context(
@@ -37,7 +39,7 @@ async def main():
             await textarea.click()
             await textarea.fill("https://www.youtube.com/watch?v=s0jL3EKxt6I")
             await page.wait_for_timeout(1500)
-            await page.screenshot(path="/home/z/my-project/scripts/new-ui-yt-chip.png", full_page=False)
+            await page.screenshot(path=os.path.join(script_dir, "new-ui-yt-chip.png"), full_page=False)
             print("✓ YouTube chip screenshot saved")
         except Exception as e:
             print(f"Typing error: {e}")

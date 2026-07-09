@@ -29,21 +29,15 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-// Force the Postgres Neon DATABASE_URL — the shell env may have a stale
-// SQLite URL (`file:...`) from an older setup, but the Prisma client is
-// generated for PostgreSQL and the schema is already pushed to Neon.
-// Override at module load time, before PrismaClient is instantiated.
-process.env.DATABASE_URL =
-  process.env.DATABASE_URL_POSTGRES ??
-  "postgresql://neondb_owner:npg_PxeOzuJc8A7D@ep-holy-thunder-atm89p5t-pooler.c-9.us-east-1.aws.neon.tech/neondb?sslmode=require";
+// Respect the database URL configured in the environment or .env file.
 
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
 
 const VIDEO_ID = process.argv[2] ?? "s0jL3EKxt6I";
-const OUT_DIR = "/home/z/my-project/scripts/visual-summary";
-const DOWNLOAD_DIR = "/home/z/my-project/download";
+const OUT_DIR = path.resolve(__dirname, ".");
+const DOWNLOAD_DIR = path.resolve(__dirname, "../../download");
 
 interface MindMapNode {
   root: string;
@@ -176,7 +170,7 @@ async function persistTranscript(
 async function fetchTranscript(
   videoId: string
 ): Promise<{ segments: Array<{ t: number; text: string }>; meta: { title: string; author?: string } }> {
-  const mod = await import("/home/z/my-project/src/lib/youtube-transcript.ts");
+  const mod = await import("../../src/lib/youtube-transcript");
   const segments = await mod.fetchTranscriptWithRetry(videoId);
   if (segments.length === 0) {
     throw new Error("Transcript fetch returned 0 segments");

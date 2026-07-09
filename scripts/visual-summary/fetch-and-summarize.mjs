@@ -199,9 +199,12 @@ async function main() {
 
   // Save outputs
   const fs = await import("node:fs/promises");
-  const outDir = "/home/z/my-project/scripts/visual-summary";
-  await fs.writeFile(`${outDir}/transcript.txt`, fullText, "utf8");
-  await fs.writeFile(`${outDir}/mindmap.json`, JSON.stringify(mindMap, null, 2), "utf8");
+  const path = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const __dirname = path.dirname(fileURLToPath(import.meta.url));
+  const outDir = __dirname;
+  await fs.writeFile(path.join(outDir, "transcript.txt"), fullText, "utf8");
+  await fs.writeFile(path.join(outDir, "mindmap.json"), JSON.stringify(mindMap, null, 2), "utf8");
 
   console.log(`\n=== DONE ===`);
   console.log(`Transcript:  ${outDir}/transcript.txt (${fullText.length} chars)`);

@@ -1,3 +1,4 @@
+import os
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -26,5 +27,6 @@ ax.text(5, 0.3, "Total: $1,160k  ·  Growth: +18% YoY",
         ha="center", fontsize=11, color="#6b7280", style="italic")
 
 fig.patch.set_facecolor("white")
-plt.savefig("/home/z/my-project/scripts/test-chart.png", dpi=100, facecolor="white")
+script_dir = os.path.dirname(os.path.abspath(__file__))
+plt.savefig(os.path.join(script_dir, "test-chart.png"), dpi=100, facecolor="white")
 print("Saved test-chart.png")

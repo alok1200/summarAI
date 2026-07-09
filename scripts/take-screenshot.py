@@ -1,8 +1,10 @@
 """Take a screenshot of the running dev server using Playwright."""
 import asyncio
+import os
 from playwright.async_api import async_playwright
 
 async def main():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
     async with async_playwright() as p:
         browser = await p.chromium.launch()
         # Login screen (dark mode)
@@ -13,7 +15,7 @@ async def main():
         page = await ctx.new_page()
         await page.goto("http://localhost:3000/", wait_until="networkidle", timeout=30000)
         await page.wait_for_timeout(1500)
-        await page.screenshot(path="/home/z/my-project/scripts/new-ui-login.png", full_page=False)
+        await page.screenshot(path=os.path.join(script_dir, "new-ui-login.png"), full_page=False)
         print("✓ Login screenshot saved")
 
         # Try to login to see the empty state
@@ -28,7 +30,7 @@ async def main():
                 if await continue_btn.count() > 0:
                     await continue_btn.click()
                     await page.wait_for_timeout(3000)
-                    await page.screenshot(path="/home/z/my-project/scripts/new-ui-empty.png", full_page=False)
+                    await page.screenshot(path=os.path.join(script_dir, "new-ui-empty.png"), full_page=False)
                     print("✓ Empty state screenshot saved")
         except Exception as e:
             print(f"Login attempt: {e}")

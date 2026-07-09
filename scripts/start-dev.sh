@@ -1,6 +1,6 @@
 #!/bin/bash
 # Start the Next.js dev server in a fully detached, persistent way.
-cd /home/z/my-project
+cd "$(dirname "$0")/.."
 
 # Kill any existing next processes
 pkill -9 -f "next-server" 2>/dev/null
